@@ -81,7 +81,7 @@ parser.add_argument(
 parser.add_argument(
     "-ar",
     "--use_aspect_ratio",
-    default=False,
+    default=True,
     action="store_true",
     help="Process the video at it's original aspect ratio",
 )
