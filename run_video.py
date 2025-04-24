@@ -119,7 +119,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--keep_history_on_new_prompts",
-    default=False,
+    default=True,
     action="store_true",
     help="If set, existing history data will not be cleared when adding new prompts",
 )
