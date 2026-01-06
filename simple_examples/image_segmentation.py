@@ -3,21 +3,19 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
-
+        raise ImportError("Can't find path to muggled_sam folder!")
 import cv2
 import torch
-from lib.make_sam import make_sam_from_state_dict
-
+from muggled_sam.make_sam import make_sam_from_state_dict
 
 # Define pathing
 image_path = "/path/to/image.jpg"
@@ -44,7 +42,7 @@ sammodel.to(device=device, dtype=dtype)
 
 # Process data
 print("Generating masks...")
-encoded_img, token_hw, preencode_img_hw = sammodel.encode_image(img_bgr, max_side_length=1024, use_square_sizing=True)
+encoded_img, token_hw, preencode_img_hw = sammodel.encode_image(img_bgr, max_side_length=None, use_square_sizing=True)
 encoded_prompts = sammodel.encode_prompts(box_tlbr_norm_list, fg_xy_norm_list, bg_xy_norm_list)
 mask_preds, iou_preds = sammodel.generate_masks(encoded_img, encoded_prompts, mask_hint)
 

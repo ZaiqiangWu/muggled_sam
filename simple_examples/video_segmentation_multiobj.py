@@ -3,23 +3,22 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
-
+        raise ImportError("Can't find path to muggled_sam folder!")
 from collections import defaultdict
 import cv2
 import numpy as np
 import torch
-from lib.v2_sam.make_sam_v2 import make_samv2_from_original_state_dict
-from lib.demo_helpers.video_data_storage import SAM2VideoObjectResults
+from muggled_sam.make_sam import make_sam_from_state_dict
+from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults
 
 
 # Define pathing & device usage
@@ -66,7 +65,7 @@ enable_prompt_visualization = True
 # Set up memory storage for tracked objects
 # -> Assumes each object is represented by a unique dictionary key (e.g. 'obj1')
 # -> This holds both the 'prompt' & 'recent' memory data needed for tracking!
-memory_per_obj_dict = defaultdict(SAM2VideoObjectResults.create)
+memory_per_obj_dict = defaultdict(SAMVideoObjectResults.create)
 
 # Read first frame to check that we can read from the video, then reset playback
 vcap = cv2.VideoCapture(video_path)
@@ -77,7 +76,8 @@ vcap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
 # Set up model
 print("Loading model...")
-model_config_dict, sammodel = make_samv2_from_original_state_dict(model_path)
+model_config_dict, sammodel = make_sam_from_state_dict(model_path)
+assert sammodel.name in ("samv2", "samv3"), "Only SAMv2/v3 are supported for video segmentation"
 sammodel.to(device=device, dtype=dtype)
 
 # Process video frames
@@ -142,7 +142,7 @@ try:
 
             # Store 'recent' memory encodings from current frame (helps track objects with changing appearance)
             # -> This can be commented out and tracking may still work, if object doesn't change much
-            obj_memory.store_result(frame_idx, mem_enc, obj_ptr)
+            obj_memory.store_frame_result(frame_idx, mem_enc, obj_ptr)
 
             # Add object mask prediction to 'combine' mask for display
             # -> This is just for visualization, not needed for tracking

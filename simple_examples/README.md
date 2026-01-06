@@ -6,6 +6,11 @@ This folder contains several scripts that contain minimal/simplified examples of
 > All of these scripts require modifying hard-coded pathing (usually near the top of the script) to point at files/models to load for the example.
 
 
+## Auto Mask Generator
+
+This script runs the SAM model (v1 or v2) as an 'auto-mask generator', similar to the capability provided by the [original repo implementation](https://github.com/facebookresearch/sam2/blob/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/automatic_mask_generator.py#L36). It works by running the SAM model with a (dense) grid of single point prompts to generate masks from all parts of the image, while filtering bad/overlapping results. This version provides a visualization (if enabled in the settings) of the results as they're being generated.
+
+
 ## Image Segmentation
 
 This script contains the most basic usage of the SAM models, which is to segment an image based on a set of provided prompts (bounding boxes, foreground points, background points or masks).
@@ -17,29 +22,36 @@ This is an extension of the basic image segmentation script, modified to show ho
 
 ## Speed Benchmarking
 
-This script runs each of the image segmentation components repeatedly while timing the average execution speed. It can be used to get a sense of how fast each of the different model variants will run and supports changing the image size used by the model. For example, here are some examples results (using an RTX 3090) for SAMv1 & V2 models at different input image sizes, using bfloat16 & square image sizing:
+This script runs each of the image segmentation components repeatedly while timing the average execution speed. It can be used to get a sense of how fast each of the different model variants will run and supports changing the image size used by the model. For example, here are some examples results (using an RTX 3090) for SAMv1, v2 & v3 models at different input image sizes, using bfloat16 & square image sizing:
 
 | Model | Encoding @ 1024px | Encoding @ 512px | Mask Generation |
 | ----- | ----------------- | ---------------- | --------------- |
-| V1-Base | 44 ms | 10 ms | 1.5 ms | 
-| V1-Large  | 101 ms | 26 ms | 1.5 ms |
-| V2-Tiny  | 10 ms | 3.1 ms | 1.6 ms |
-| V2-Large  | 47 ms | 13 ms | 1.6 ms |
+| V1-Base   | 44 ms  | 10 ms  | 1.5 ms |
+| V1-Large  | 101 ms | 26 ms  | 1.5 ms |
+| V2-Tiny   | 10 ms  | 3.1 ms | 1.6 ms |
+| V2-Large  | 47 ms  | 13 ms  | 1.6 ms |
+| V3        | 148ms  | 39 ms  | 1.5 ms |
+
+| Model | Encoding @ 1008px | Encoding @ 504px | Mask Generation |
+| ----- | ----------------- | ---------------- | --------------- |
+| V3        | 109ms  | 41 ms  | 1.5 ms |
+
+The SAMv3 results are shown for both 1024px and 1008px (it's native default), since the model takes a _significant_ performance hit at the v1/v2 default 1024px sizing. Strangely, it's also consistently slower at 504px vs. 512px.
 
 The script also prints out an estimate of VRAM usage (if using cuda):
 
 | Model | VRAM @ 1024px | VRAM @ 512px |
 | ----- | ------------- | ------------ |
-| V1-Base | 2.4 GB | 1.1 GB |
-| V1-Large | 3.3 GB | 1.6 GB |
-| V2-Tiny | 1.1 GB | 0.9 GB  |
-| V2-Large | 1.7 GB | 1.4 GB |
-
+| V1-Base | 1.7 GB | 0.4 GB |
+| V1-Large | 2.6 GB | 0.9 GB |
+| V2-Tiny | 0.5 GB | 0.3 GB  |
+| V2-Large | 1.0 GB | 0.7 GB |
+| V3 | 1.5 GB | 1.2 GB |
 
 
 ## Video Segmentation
 
-This script provides a basic example of how to implement video segmentation using the SAMv2 model (V1 does not support video segmentation!). For simplicity, this script assumes that tracking begins with a prompt on the first frame of the video, but any frame could be used. It also only stores results for one object, though again this can be changed to handle multiple objects by creating instances of the video storage data for each object.
+This script provides a basic example of how to implement video segmentation using the SAMv2 or v3 model (V1 does not support video segmentation!). For simplicity, this script assumes that tracking begins with a prompt on the first frame of the video, but any frame could be used. It also only stores results for one object, though again this can be changed to handle multiple objects by creating instances of the video storage data for each object.
 
 Segmentation results are displayed per-frame for verification, and the total inference time is also printed out. For example, the table below shows the per-frame inference times for different models while tracking one object at different image sizes using bfloat16 (all other settings are left at defaults):
 
@@ -49,10 +61,17 @@ Segmentation results are displayed per-frame for verification, and the total inf
 | V2-Small | 28 ms | 8 ms |
 | V2-Base | 38 ms | 11 ms |
 | V2-Large | 64 ms | 17 ms |
+| V3 | 172ms | 46ms |
+
+| Model | Inference @ 1008 | Inference @ 504 |
+| ----- | ---------------- | --------------- |
+| V3 | 130ms | 47ms |
+
+Again, the results for the v3 model using 1008px are included as it runs much slower when using the v1/v2 default sizing.
 
 ## Video Segmentation (from mask)
 
-This is a variation of the basic video segmentation example, but uses a mask prompt to begin tracking. Both a mask and corresponding image (i.e. the image from which the mask was generated) must be provided, and replaces the need to provide box or point prompts. Note that the mask & corresponding image don't need to be from the video! Mixing the mask iamge and video can give results similar to the [video with image priors](https://github.com/heyoeyo/muggled_sam/tree/main/experiments#video-with-image-priors) experimental script.
+This is a variation of the basic video segmentation example, but uses a mask prompt to begin tracking. Both a binary mask and corresponding image (i.e. the RGB image from which the mask was generated) must be provided, and replaces the need to provide box or point prompts. Note that the mask & corresponding image don't need to be from the video! Mixing the mask image and video can give results similar to the [video with image priors](https://github.com/heyoeyo/muggled_sam/tree/main/experiments#video-with-image-priors) experimental script.
 
 ## Video Segmentation (Multi-object)
 

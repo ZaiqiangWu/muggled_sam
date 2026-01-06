@@ -7,16 +7,16 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
+        raise ImportError("Can't find path to muggled_sam folder!")
 
 import os.path as osp
 import argparse
@@ -26,17 +26,17 @@ from collections import deque
 import torch
 import cv2
 
-from lib.make_sam import make_sam_from_state_dict
-from lib.v2_sam.sam_v2_model import SAMV2Model
+from muggled_sam.make_sam import make_sam_from_state_dict
 
-from lib.demo_helpers.ui.video import ValueChangeTracker
-from lib.demo_helpers.ui.window import DisplayWindow, KEY
-from lib.demo_helpers.ui.layout import HStack, VStack, OverlayStack
-from lib.demo_helpers.ui.images import ExpandingImage
-from lib.demo_helpers.ui.text import ValueBlock
-from lib.demo_helpers.ui.static import StaticMessageBar, HSeparator, VSeparator
-from lib.demo_helpers.ui.sliders import HSlider
-from lib.demo_helpers.shared_ui_layout import (
+from muggled_sam.demo_helpers.ui.video import ValueChangeTracker
+from muggled_sam.demo_helpers.ui.window import DisplayWindow, KEY
+from muggled_sam.demo_helpers.ui.layout import HStack, VStack, OverlayStack
+from muggled_sam.demo_helpers.ui.images import ExpandingImage
+from muggled_sam.demo_helpers.ui.text import ValueBlock
+from muggled_sam.demo_helpers.ui.static import StaticMessageBar, HSeparator, VSeparator
+from muggled_sam.demo_helpers.ui.buttons import ImmediateButton
+from muggled_sam.demo_helpers.ui.sliders import HSlider
+from muggled_sam.demo_helpers.shared_ui_layout import (
     build_mask_preview_buttons,
     build_tool_buttons,
     build_tool_overlays,
@@ -45,12 +45,13 @@ from lib.demo_helpers.shared_ui_layout import (
     update_mask_preview_buttons,
 )
 
-from lib.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
-from lib.demo_helpers.contours import get_contours_from_mask
-from lib.demo_helpers.mask_postprocessing import calculate_mask_stability_score
-from lib.demo_helpers.history_keeper import HistoryKeeper
-from lib.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing, load_init_prompts
-from lib.demo_helpers.misc import get_default_device_string, make_device_config, get_total_cuda_vram_usage_mb
+from muggled_sam.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
+from muggled_sam.demo_helpers.contours import MaskContourData, get_contours_from_mask
+from muggled_sam.demo_helpers.mask_postprocessing import calculate_mask_stability_score
+from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
+from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing, load_init_prompts
+from muggled_sam.demo_helpers.misc import get_default_device_string, make_device_config, get_total_cuda_vram_usage_mb
+from muggled_sam.demo_helpers.saving import save_image_segmentation, get_save_name, make_prompt_save_data
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -63,7 +64,7 @@ default_image_path_2 = None
 default_model_path = None
 default_prompts_path = None
 default_display_size = 900
-default_base_size = 1024
+default_base_size = None
 
 # Define script arguments
 parser = argparse.ArgumentParser(description="Segment one image by prompting another, using SAMv2 'video' capability")
@@ -103,7 +104,7 @@ parser.add_argument(
     "--base_size_px",
     default=default_base_size,
     type=int,
-    help=f"Override base model size (default {default_base_size})",
+    help="Set image processing size (will use model default if not set)",
 )
 parser.add_argument(
     "--hide_info",
@@ -135,8 +136,8 @@ device_str = args.device
 use_float32 = args.use_float32
 imgenc_base_size = args.base_size_px
 show_info = not args.hide_info
-use_hstack_images = args.hstack
-use_vstack_images = args.vstack
+force_hstack = args.hstack
+force_vstack = args.vstack
 
 # Set up device config
 device_config_dict = make_device_config(device_str, use_float32)
@@ -165,7 +166,7 @@ history.store(image_path=image_path_a, cross_image_path=image_path_b, model_path
 model_name = osp.basename(model_path)
 print("", "Loading model weights...", f"  @ {model_path}", sep="\n", flush=True)
 model_config_dict, sammodel = make_sam_from_state_dict(model_path)
-assert isinstance(sammodel, SAMV2Model), "Only SAMv2 models are supported for cross-segmentation!"
+assert sammodel.name in ("samv2", "samv3"), "Only SAMv2/v3 models are supported for cross-segmentation!"
 sammodel.to(**device_config_dict)
 
 # Load image and get shaping info for providing display
@@ -185,17 +186,16 @@ if full_image_b is None:
         raise FileNotFoundError(osp.basename(image_path_b))
 
 # Determine stacking direction
-need_auto_stack_check = not (use_hstack_images or use_vstack_images)
-if need_auto_stack_check:
+use_hstack_images = None
+if force_hstack:
+    use_hstack_images = True
+elif force_vstack:
+    use_hstack_images = False
+else:
     img_a_h, img_a_w = full_image_a.shape[0:2]
     img_b_h, img_b_w = full_image_b.shape[0:2]
     have_narrow_img = (img_a_h > img_a_w) or (img_b_h > img_b_w)
     use_hstack_images = have_narrow_img
-    use_vstack_images = not have_narrow_img
-elif use_hstack_images:
-    use_vstack_images = False
-elif use_vstack_images:
-    use_hstack_images = False
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -273,13 +273,14 @@ has_cuda = torch.cuda.is_available()
 stability_score_txt_a = ValueBlock("Stability A: ")
 objscore_text = ValueBlock("Object Score: ", None, max_characters=3)
 stability_score_txt_b = ValueBlock("Stability B: ")
-text_scores_bar = HStack(stability_score_txt_a, objscore_text, stability_score_txt_b)
+save_btn = ImmediateButton("Save", (60, 170, 20), text_scale=0.35)
+text_scores_bar = HStack(stability_score_txt_a, objscore_text, stability_score_txt_b, save_btn)
 
 # Decide on images/masks layout
 preview_a_btns = VStack(*mask_a_btns)
 preview_b_btns = VStack(*mask_b_btns)
 img_layout = HStack(overlay_img_a, preview_a_btns, HSeparator(8), overlay_img_b, preview_b_btns)
-if use_vstack_images:
+if not use_hstack_images:
     vsep_a, vsep_b = VSeparator.many(2, 8)
     img_layout = HStack(VStack(overlay_img_a, vsep_a, overlay_img_b), VStack(preview_a_btns, vsep_b, preview_b_btns))
 
@@ -323,10 +324,11 @@ window.move(200, 50)
 window.attach_keypress_callback(KEY.LEFT_ARROW, tools_constraint.previous)
 window.attach_keypress_callback(KEY.RIGHT_ARROW, tools_constraint.next)
 window.attach_keypress_callback("c", tools_group.clear.click)
-window.attach_keypress_callback("w", masks_a_constraint.previous)
-window.attach_keypress_callback("s", masks_a_constraint.next)
-window.attach_keypress_callback("e", masks_b_constraint.previous)
-window.attach_keypress_callback("d", masks_b_constraint.next)
+window.attach_keypress_callback("y", masks_a_constraint.previous)
+window.attach_keypress_callback("h", masks_a_constraint.next)
+window.attach_keypress_callback("u", masks_b_constraint.previous)
+window.attach_keypress_callback("j", masks_b_constraint.next)
+window.attach_keypress_callback("s", save_btn.click)
 
 # For clarity, some additional keypress codes
 KEY_ZOOM_IN = ord("=")
@@ -348,7 +350,10 @@ print(
     "Use prompts on one image to segment the other!",
     "- Shift-click to add multiple points",
     "- Right-click to remove points",
+    "- Press 'c' key to clear prompts",
     "- Press -/+ keys to change display sizing",
+    "- Use y/h and u/j to adjust mask selections",
+    "- Press 's' key to save cross-segmented result",
     "- Press q or esc to close the window",
     "",
     sep="\n",
@@ -469,6 +474,56 @@ try:
         if keypress == KEY_ZOOM_OUT:
             display_size_px = max(display_size_px - 50, min_display_size_px)
             render_limit_dict = {render_side: display_size_px}
+
+        # Save data
+        if save_btn.read():
+
+            # Get data for saving -> want to save image that isn't prompted
+            # (though we'll save the prompts from the other image, just because...)
+            is_side_a_prompted = sammodel.check_have_prompts(*prompts_a)
+            is_side_b_prompted = sammodel.check_have_prompts(*prompts_b)
+            if not (is_side_a_prompted or is_side_b_prompted):
+                print("", "No prompts! Will skip saving...", sep="\n", flush=True)
+                continue
+
+            # Get data for saving
+            selected_prompts = prompts_a if is_side_b_prompted else prompts_b
+            prompt_image_save_path = image_path_a if is_side_a_prompted else image_path_b
+            image_save_path = image_path_b if is_side_a_prompted else image_path_a
+            mask_select_idx = mask_b_idx if is_side_a_prompted else mask_a_idx
+            img_save_bgr = full_image_b if is_side_a_prompted else full_image_a
+            mask_save_preds = cross_preds[0, mask_select_idx]
+
+            # Get additional (shared) data for saving
+            disp_image = disp_layout.rerender()
+            all_prompts_dict = make_prompt_save_data(*selected_prompts)
+
+            # Make result matching input image sizing
+            img_save_hw = img_save_bgr.shape[0:2]
+            mask_save_uint8 = make_hires_mask_uint8(mask_save_preds, img_save_hw, mask_threshold)
+            contour_save_data = MaskContourData(mask_save_uint8)
+
+            # Generate & save segmentation images!
+            parent_folder_name = "cross_segmentation"
+            save_folder, save_idx = get_save_name(image_save_path, parent_folder_name, base_save_folder=root_path)
+            save_image_segmentation(
+                save_folder,
+                save_idx,
+                img_save_bgr,
+                disp_image,
+                mask_save_uint8,
+                contour_save_data,
+                all_prompts_dict,
+                yx_crop_slices=None,
+            )
+
+            # Save simple text file containing path to the image used for prompting
+            ref_save_name = osp.join(save_folder, f"{save_idx}_prompt_image_path.txt")
+            with open(ref_save_name, "w") as outfile:
+                outfile.write(prompt_image_save_path)
+
+            # Feedback on completion
+            print(f"SAVED ({save_idx}):", save_folder)
 
 except KeyboardInterrupt:
     print("", "Closed with Ctrl+C", sep="\n")

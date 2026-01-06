@@ -7,16 +7,16 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
+        raise ImportError("Can't find path to muggled_sam folder!")
 
 import argparse
 import os.path as osp
@@ -25,23 +25,22 @@ from time import perf_counter
 import torch
 import cv2
 
-from lib.make_sam import make_sam_from_state_dict
-from lib.v2_sam.sam_v2_model import SAMV2Model
+from muggled_sam.make_sam import make_sam_from_state_dict
 
-from lib.demo_helpers.ui.window import DisplayWindow, KEY
-from lib.demo_helpers.ui.layout import HStack, VStack
-from lib.demo_helpers.ui.buttons import ToggleButton, RadioConstraint
-from lib.demo_helpers.ui.sliders import HSlider, HMultiSlider
-from lib.demo_helpers.ui.static import StaticMessageBar
-from lib.demo_helpers.ui.colormaps import HColormapsBar
-from lib.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI, ReusableBaseImage
+from muggled_sam.demo_helpers.ui.window import DisplayWindow, KEY
+from muggled_sam.demo_helpers.ui.layout import HStack, VStack
+from muggled_sam.demo_helpers.ui.buttons import ToggleButton, RadioConstraint
+from muggled_sam.demo_helpers.ui.sliders import HSlider, HMultiSlider
+from muggled_sam.demo_helpers.ui.static import StaticMessageBar
+from muggled_sam.demo_helpers.ui.colormaps import HColormapsBar
+from muggled_sam.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI, ReusableBaseImage
 
-from lib.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
-from lib.demo_helpers.contours import get_contours_from_mask
+from muggled_sam.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
+from muggled_sam.demo_helpers.contours import get_contours_from_mask
 
-from lib.demo_helpers.history_keeper import HistoryKeeper
-from lib.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing, load_init_prompts
-from lib.demo_helpers.misc import get_default_device_string, make_device_config, normalize_to_npuint8
+from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
+from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing, load_init_prompts
+from muggled_sam.demo_helpers.misc import get_default_device_string, make_device_config, normalize_to_npuint8
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -53,7 +52,7 @@ default_image_path = None
 default_model_path = None
 default_prompts_path = None
 default_display_size = 900
-default_base_size = 1024
+default_base_size = None
 
 # Define script arguments
 parser = argparse.ArgumentParser(description="Visualizes SAM mask data while allowing for altered window sizing")
@@ -99,7 +98,7 @@ parser.add_argument(
     "--base_size_px",
     default=default_base_size,
     type=int,
-    help=f"Override base model size (default {default_base_size})",
+    help="Set image processing size (will use model default if not set)",
 )
 parser.add_argument(
     "-nq",
@@ -154,7 +153,7 @@ model_name = osp.basename(model_path)
 print("", "Loading model weights...", f"  @ {model_path}", sep="\n", flush=True)
 model_config_dict, sammodel = make_sam_from_state_dict(model_path)
 sammodel.to(**device_config_dict)
-is_v2_model = isinstance(sammodel, SAMV2Model)
+is_v2_model = sammodel.name == "samv2"
 
 # Load image (or frame from video)
 full_image_bgr = cv2.imread(image_path)
@@ -207,12 +206,13 @@ ui_elems = PromptUI(full_image_bgr, init_mask_preds)
 uictrl = PromptUIControl(ui_elems)
 
 # Set up slider controls
+init_img_size = max(preencode_img_hw)
 rescale_slider = HSlider("Input rescale", 1, 0, 2, step_size=0.01, marker_steps=10, bar_bg_color=(35, 55, 60))
 sidelength_slider = HSlider(
     "Encoding Side Length",
-    initial_value=imgenc_base_size,
+    initial_value=init_img_size,
     min_value=32,
-    max_value=max(2 * imgenc_base_size, 1024),
+    max_value=max(2 * init_img_size, 1024),
     step_size=32,
     marker_steps=8,
     bar_bg_color=(35, 55, 60),
@@ -327,10 +327,14 @@ try:
 
             # Update window sizing & re-run image segmentation to get new (raw) mask outputs for display
             t1 = perf_counter()
-            encoded_img, _, _ = sammodel.encode_image(rescaled_img_bgr, max_side_length, use_square_sizing)
+            encoded_img, token_hw, _ = sammodel.encode_image(rescaled_img_bgr, max_side_length, use_square_sizing)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t2 = perf_counter()
+
+            # Update token sizing
+            token_hw_str = f"{token_hw[0]} x {token_hw[1]}"
+            header_msgbar.update_message(f"{token_hw_str} tokens", target_index=1)
 
         # Update masking result
         need_mask_update = need_prompt_encode or need_image_encode

@@ -15,27 +15,32 @@ import torch
 import cv2
 import numpy as np
 
-from lib.make_sam import make_sam_from_state_dict
-from lib.v2_sam.sam_v2_model import SAMV2Model
+from muggled_sam.make_sam import make_sam_from_state_dict
 
-from lib.demo_helpers.ui.window import DisplayWindow, KEY
-from lib.demo_helpers.ui.video import ReversibleLoopingVideoReader, LoopingVideoPlaybackSlider, ValueChangeTracker
-from lib.demo_helpers.ui.layout import HStack, VStack
-from lib.demo_helpers.ui.buttons import ToggleButton, ImmediateButton, RadioConstraint
-from lib.demo_helpers.ui.static import StaticMessageBar
-from lib.demo_helpers.ui.text import ValueBlock, TextBlock
-from lib.demo_helpers.ui.base import force_same_min_width
-from lib.demo_helpers.ui.overlays import DrawPolygonsOverlay
+from muggled_sam.demo_helpers.ui.window import DisplayWindow, KEY
+from muggled_sam.demo_helpers.ui.video import (
+    ReversibleLoopingVideoReader,
+    LoopingVideoPlaybackSlider,
+    ValueChangeTracker,
+)
+from muggled_sam.demo_helpers.ui.layout import HStack, VStack
+from muggled_sam.demo_helpers.ui.buttons import ToggleButton, ImmediateButton, RadioConstraint
+from muggled_sam.demo_helpers.ui.static import StaticMessageBar
+from muggled_sam.demo_helpers.ui.text import ValueBlock, TextBlock
+from muggled_sam.demo_helpers.ui.base import force_same_min_width
+from muggled_sam.demo_helpers.ui.overlays import DrawPolygonsOverlay
+from muggled_sam.demo_helpers.ui.helpers.images import FrameCompositing
 
-from lib.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI
-from lib.demo_helpers.crop_ui import run_crop_ui
+from muggled_sam.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI
+from muggled_sam.demo_helpers.crop_ui import run_crop_ui
 
-from lib.demo_helpers.misc import PeriodicVRAMReport, make_device_config, get_default_device_string
-from lib.demo_helpers.history_keeper import HistoryKeeper
-from lib.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing
-from lib.demo_helpers.contours import get_contours_from_mask
-from lib.demo_helpers.video_data_storage import SAM2VideoObjectResults
-from lib.demo_helpers.saving import save_video_frames, get_save_name
+from muggled_sam.demo_helpers.misc import PeriodicVRAMReport, make_device_config, get_default_device_string
+from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
+from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing
+from muggled_sam.demo_helpers.contours import get_contours_from_mask
+from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults
+from muggled_sam.demo_helpers.saving import save_video_frames, get_save_name
+from muggled_sam.demo_helpers.ffmpeg import get_default_ffmpeg_command, verify_ffmpeg_path, save_video_stream
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -47,11 +52,13 @@ default_image_path = None
 default_model_path = None
 default_prompts_path = None
 default_display_size = 900
-default_base_size = 1024
+default_base_size = None
 default_max_memory_history = 6
 default_max_pointer_history = 15
 default_num_object_buffers = 4
 default_object_score_threshold = 0.0
+default_bg_color_hex = "ff00ff00"
+default_ffmpeg = get_default_ffmpeg_command()
 
 # Define script arguments
 parser = argparse.ArgumentParser(description="Script used to run Segment-Anything-V2 (SAMv2) on a video")
@@ -90,7 +97,7 @@ parser.add_argument(
     "--base_size_px",
     default=default_base_size,
     type=int,
-    help=f"Override base model size (default: {default_base_size})",
+    help="Set image processing size (will use model default if not set)",
 )
 parser.add_argument(
     "-n",
@@ -150,10 +157,25 @@ parser.add_argument(
     help="If set, this simplifies the UI by hiding the element associated with saving",
 )
 parser.add_argument(
+    "--ffmpeg",
+    nargs="?",
+    const=default_ffmpeg,
+    default=None,
+    type=str,
+    help=f"Save as mp4 (using FFmpeg). Can optionally provide a path to executable (default: {default_ffmpeg})",
+)
+parser.add_argument(
     "--crop",
     default=False,
     action="store_true",
     help="If set, a cropping UI will appear on start-up to allow for the image to be cropped prior to processing",
+)
+parser.add_argument(
+    "-bg",
+    "--bg_color_hex",
+    default=default_bg_color_hex,
+    type=str,
+    help=f"Color of segmented regions, given as RGB or RGBA hex code (default: {default_bg_color_hex})",
 )
 
 # For convenience
@@ -175,6 +197,8 @@ object_score_threshold = args.objscore_threshold
 show_info = not args.hide_info
 use_webcam = args.use_webcam
 enable_crop_ui = args.crop
+bg_color_hex = args.bg_color_hex
+arg_ffmpeg = args.ffmpeg
 
 # Set up device config
 device_config_dict = make_device_config(device_str, use_float32)
@@ -198,6 +222,15 @@ else:
 # ---------------------------------------------------------------------------------------------------------------------
 # %% Load resources
 
+# Check that we can call ffmpeg if flag was given
+use_ffmpeg, ffmpeg_path = verify_ffmpeg_path(arg_ffmpeg)
+if use_ffmpeg:
+    print("", "Found valid FFmpeg path:", f"@ {ffmpeg_path}", sep="\n", flush=True)
+
+# Set up masking/chroma-keying for saving frames (do this early so we fail on bad inputs before loading bigger files!)
+mask_color_bgra = FrameCompositing.parse_hex_color(bg_color_hex)
+save_masking = FrameCompositing(mask_color_bgra)
+
 # Set up shared image encoder settings (needs to be consistent across image/video frame encodings)
 imgenc_config_dict = {"max_side_length": imgenc_base_size, "use_square_sizing": use_square_sizing}
 
@@ -206,11 +239,12 @@ model_name = osp.basename(model_path)
 
 print("", "Loading model weights...", f"  @ {model_path}", sep="\n", flush=True)
 model_config_dict, sammodel = make_sam_from_state_dict(model_path)
-assert isinstance(sammodel, SAMV2Model), "Only SAMv2 models are supported for video predictions!"
+assert sammodel.name in ("samv2", "samv3"), "Only SAMv2/v3 models are supported for video predictions!"
 sammodel.to(**device_config_dict)
 
 # Set up access to video
 vreader = ReversibleLoopingVideoReader(video_path).release()
+video_fps = vreader.get_fps()
 sample_frame = vreader.get_sample_frame()
 if enable_crop_ui:
     print("", "Cropping enabled: Adjust box to select image area for further processing", sep="\n", flush=True)
@@ -305,6 +339,45 @@ class SaveBufferData:
         return self
 
 
+def save_segmentation_results(
+    video_path: str,
+    video_fps: float,
+    buffer_index: int,
+    save_frames_dict: dict,
+    ffmpeg_path: str | None,
+    use_ffmpeg: bool,
+) -> bool:
+    """
+    Wrapper around saving tarfiles vs. video (with ffmpeg)
+    Returns updated 'use_ffmpeg' which may be toggled false if video encoding fails!
+    """
+
+    # Build save pathing
+    save_folder, save_idx = get_save_name(video_path, "run_video")
+    min_fidx, max_fidx = min(save_frames_dict.keys()), max(save_frames_dict.keys())
+    save_name = f"{save_idx}_obj{1+buffer_index}_{min_fidx}_to_{max_fidx}_frames"
+    save_path_no_ext = osp.join(save_folder, save_name)
+
+    # Save with ffmpeg
+    if use_ffmpeg:
+        print("", "Encoding video", sep="\n", flush=True)
+        ok_save, save_path = save_video_stream(ffmpeg_path, save_path_no_ext, video_fps, save_frames_dict)
+        if ok_save:
+            print(f"@ {save_path}")
+        else:
+            print("-> Error saving with FFmpeg, will fall back to saving tarfile")
+            use_ffmpeg = False
+
+    # Not using 'else' here, because encoding may have failed
+    # -> This makes ffmpeg failure fallback to saving pngs
+    if not use_ffmpeg:
+        print("", f"Saving frame data ({num_frames} frames)...", sep="\n", flush=True)
+        save_file_path = save_video_frames(save_path_no_ext, save_frames_dict)
+        print(f"@ {save_file_path}")
+
+    return use_ffmpeg
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # %% Set up UI
 
@@ -313,7 +386,7 @@ playback_slider = LoopingVideoPlaybackSlider(vreader, stay_paused_on_change=True
 
 # Set up shared UI elements & control logic
 ui_elems = PromptUI(sample_frame, init_mask_preds, 2)
-uictrl = PromptUIControl(ui_elems)
+uictrl = PromptUIControl(ui_elems, mask_color_bgra)
 
 # Add extra polygon drawer for unselected objects
 unselected_olay = DrawPolygonsOverlay((50, 5, 130), (25, 0, 60))
@@ -424,7 +497,7 @@ objiter = list(range(num_obj_buffers))
 maskresults_list = [MaskResults.create(init_mask_preds) for _ in objiter]
 savebuffers_list = [SaveBufferData.create() for _ in objiter]
 memory_list = [
-    SAM2VideoObjectResults.create(max_memory_history, max_pointer_history, prompt_history_length=32) for _ in objiter
+    SAMVideoObjectResults.create(max_memory_history, max_pointer_history, prompt_history_length=32) for _ in objiter
 ]
 
 vreader.pause()
@@ -631,7 +704,7 @@ try:
                     if obj_score < object_score_threshold and discard_on_bad_objscore:
                         mask_preds = mask_preds * 0.0
                     elif is_trackhistory_enabled:
-                        memory_list[objidx].store_result(frame_idx, mem_enc, obj_ptr)
+                        memory_list[objidx].store_frame_result(frame_idx, mem_enc, obj_ptr)
 
                     # UGLY! Store results for each tracked object
                     maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
@@ -713,10 +786,8 @@ try:
                     save_mask_1ch_uint8 = full_mask_1ch
                     save_frame = full_frame
 
-                # Add mask to alpha channel (and clear masked RGB data, reduces file size!)
-                save_frame = cv2.bitwise_and(save_frame, cv2.cvtColor(save_mask_1ch_uint8, cv2.COLOR_GRAY2BGR))
-                save_frame = cv2.cvtColor(save_frame, cv2.COLOR_BGR2BGRA)
-                save_frame[:, :, -1] = save_mask_1ch_uint8
+                # Mask out image for saving
+                save_frame = save_masking.mask_frame(save_frame, save_mask_1ch_uint8)
 
                 # Encode frame data in memory (want to save in bulk, to avoid killing filesystem)
                 ok_encode, png_encoding = cv2.imencode(".png", save_frame)
@@ -738,9 +809,11 @@ try:
             png_per_frame_dict = savebuffers_list[buffer_select_idx].png_per_frame_dict
             num_frames = len(png_per_frame_dict.keys())
             if num_frames > 0:
-                save_folder, save_idx = get_save_name(video_path, "video")
-                save_file_path = save_video_frames(save_folder, save_idx, buffer_select_idx, png_per_frame_dict)
-                print("", f"Saving frame data ({num_frames} frames)...", f"@ {save_file_path}", sep="\n")
+                use_ffmpeg = save_segmentation_results(
+                    video_path, video_fps, buffer_select_idx, png_per_frame_dict, ffmpeg_path, use_ffmpeg
+                )
+
+                # Trigger clear of data so we don't re-save it
                 buffer_clear_btn.click()
 
         # Wipe out save data if needed
@@ -751,21 +824,21 @@ try:
 except KeyboardInterrupt:
     print("", "Closed with Ctrl+C", sep="\n")
 
-except Exception as err:
-    raise err
-
 finally:
     # Clean up resources
     cv2.destroyAllWindows()
     vreader.release()
 
-    # Save any buffered frame data
-    for objidx, savebuffer in enumerate(savebuffers_list):
-        png_per_frame_dict = savebuffer.png_per_frame_dict
-        num_frames = len(png_per_frame_dict.keys())
-        if num_frames > 0:
-            save_folder, save_idx = get_save_name(video_path, "video")
-            save_file_path = save_video_frames(save_folder, save_idx, objidx, png_per_frame_dict)
-            print("", f"Saving frame data ({num_frames} frames)...", f"@ {save_file_path}", sep="\n")
 
+# ---------------------------------------------------------------------------------------------------------------------
+# %% Final clean up
+
+# Save any buffered frame data
+for objidx, savebuffer in enumerate(savebuffers_list):
+    png_per_frame_dict = savebuffer.png_per_frame_dict
+    num_frames = len(png_per_frame_dict.keys())
+    if num_frames > 0:
+        use_ffmpeg = save_segmentation_results(
+            video_path, video_fps, objidx, png_per_frame_dict, ffmpeg_path, use_ffmpeg
+        )
     pass

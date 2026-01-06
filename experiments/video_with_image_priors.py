@@ -7,16 +7,16 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
+        raise ImportError("Can't find path to muggled_sam folder!")
 
 import os.path as osp
 import argparse
@@ -25,24 +25,23 @@ from time import perf_counter
 import torch
 import cv2
 
-from lib.make_sam import make_sam_from_state_dict
-from lib.v2_sam.sam_v2_model import SAMV2Model
+from muggled_sam.make_sam import make_sam_from_state_dict
 
-from lib.demo_helpers.ui.video import LoopingVideoReader, LoopingVideoPlaybackSlider, ValueChangeTracker
-from lib.demo_helpers.ui.window import DisplayWindow
-from lib.demo_helpers.ui.layout import HStack, VStack
-from lib.demo_helpers.ui.buttons import ToggleButton, ImmediateButton
-from lib.demo_helpers.ui.text import TitledTextBlock, ValueBlock
-from lib.demo_helpers.ui.static import StaticMessageBar
-from lib.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI, ReusableBaseImage
+from muggled_sam.demo_helpers.ui.video import LoopingVideoReader, LoopingVideoPlaybackSlider, ValueChangeTracker
+from muggled_sam.demo_helpers.ui.window import DisplayWindow
+from muggled_sam.demo_helpers.ui.layout import HStack, VStack
+from muggled_sam.demo_helpers.ui.buttons import ToggleButton, ImmediateButton
+from muggled_sam.demo_helpers.ui.text import TitledTextBlock, ValueBlock
+from muggled_sam.demo_helpers.ui.static import StaticMessageBar
+from muggled_sam.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI, ReusableBaseImage
 
-from lib.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
-from lib.demo_helpers.contours import get_contours_from_mask
-from lib.demo_helpers.video_data_storage import SAM2VideoObjectResults
+from muggled_sam.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
+from muggled_sam.demo_helpers.contours import get_contours_from_mask
+from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults
 
-from lib.demo_helpers.history_keeper import HistoryKeeper
-from lib.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing
-from lib.demo_helpers.misc import PeriodicVRAMReport, get_default_device_string, make_device_config
+from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
+from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing
+from muggled_sam.demo_helpers.misc import PeriodicVRAMReport, get_default_device_string, make_device_config
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -55,7 +54,7 @@ default_video_path = None
 default_model_path = None
 default_prompts_path = None
 default_display_size = 900
-default_base_size = 1024
+default_base_size = None
 default_max_memory_history = 6
 default_max_pointer_history = 15
 default_show_iou_preds = False
@@ -98,7 +97,7 @@ parser.add_argument(
     "--base_size_px",
     default=default_base_size,
     type=int,
-    help=f"Override base model size (default {default_base_size})",
+    help="Set image processing size (will use model default if not set)",
 )
 parser.add_argument(
     "--max_memories",
@@ -174,7 +173,7 @@ model_name = osp.basename(model_path)
 
 print("", "Loading model weights...", f"  @ {model_path}", sep="\n", flush=True)
 model_config_dict, sammodel = make_sam_from_state_dict(model_path)
-assert isinstance(sammodel, SAMV2Model), "Only SAMv2 models are supported for video predictions!"
+assert sammodel.name in ("samv2", "samv3"), "Only SAMv2/v3 models are supported for video predictions!"
 sammodel.to(**device_config_dict)
 
 # Load image and get shaping info for providing display
@@ -293,7 +292,7 @@ print(
 )
 
 # Allocate storage for SAM2 video masking
-objbuffer = SAM2VideoObjectResults.create(
+objbuffer = SAMVideoObjectResults.create(
     memory_history_length=max_memory_history,
     pointer_history_length=max_pointer_history,
     prompt_history_length=32,
@@ -486,7 +485,7 @@ try:
             if obj_score < 0 and discard_on_bad_objscore:
                 video_preds = video_preds * 0.0
             elif enable_prevframe_storage:
-                objbuffer.store_result(frame_idx, mem_enc, obj_ptr)
+                objbuffer.store_frame_result(frame_idx, mem_enc, obj_ptr)
             objscore_text.set_value(round(obj_score, 1))
 
             # Update the mask indicator to show which mask the model has chosen each frame

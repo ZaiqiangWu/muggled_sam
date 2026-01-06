@@ -7,16 +7,16 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
+        raise ImportError("Can't find path to muggled_sam folder!")
 
 import argparse
 import os.path as osp
@@ -26,29 +26,64 @@ import torch
 import cv2
 import numpy as np
 
-from lib.make_sam import make_sam_from_state_dict
-from lib.v2_sam.sam_v2_model import SAMV2Model
+from muggled_sam.make_sam import make_sam_from_state_dict
 
-from lib.demo_helpers.ui.window import DisplayWindow, KEY
-from lib.demo_helpers.ui.images import ExpandingImage
-from lib.demo_helpers.ui.layout import HStack, VStack
-from lib.demo_helpers.ui.buttons import ToggleButton
-from lib.demo_helpers.ui.sliders import HSlider, HMultiSlider
-from lib.demo_helpers.ui.static import StaticMessageBar
-from lib.demo_helpers.ui.colormaps import HColormapsBar, make_spectral_colormap
-from lib.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI
-from lib.demo_helpers.ui.helpers.images import get_image_hw_for_max_height
+from muggled_sam.demo_helpers.ui.window import DisplayWindow, KEY
+from muggled_sam.demo_helpers.ui.images import ExpandingImage
+from muggled_sam.demo_helpers.ui.layout import HStack, VStack
+from muggled_sam.demo_helpers.ui.buttons import ToggleButton
+from muggled_sam.demo_helpers.ui.sliders import HSlider, HMultiSlider
+from muggled_sam.demo_helpers.ui.static import StaticMessageBar
+from muggled_sam.demo_helpers.ui.colormaps import HColormapsBar, make_spectral_colormap
+from muggled_sam.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI
+from muggled_sam.demo_helpers.ui.helpers.images import get_image_hw_for_max_height
 
-from lib.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
-from lib.demo_helpers.contours import get_contours_from_mask
+from muggled_sam.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
+from muggled_sam.demo_helpers.contours import get_contours_from_mask
 
-from lib.demo_helpers.history_keeper import HistoryKeeper
-from lib.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing, load_init_prompts
-from lib.demo_helpers.misc import get_default_device_string, make_device_config, normalize_to_npuint8
+from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
+from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing, load_init_prompts
+from muggled_sam.demo_helpers.misc import get_default_device_string, make_device_config, normalize_to_npuint8
 
 
 # ---------------------------------------------------------------------------------------------------------------------
 # %% Functions
+
+
+def encode_image_samv3(
+    model,
+    image_bgr: np.ndarray,
+    max_side_length: int = 1008,
+    use_square_sizing: bool = True,
+) -> tuple[list, list]:
+
+    with torch.inference_mode():
+
+        # Generate normal image encodings (i.e. with feature projection)
+        hflip_image_bgr = np.fliplr(image_bgr)
+        reg_encimg_list, _, _ = model.encode_image(image_bgr, max_side_length, use_square_sizing)
+        flip_encimg_list, _, _ = model.encode_image(hflip_image_bgr, max_side_length, use_square_sizing)
+
+        # Combine regular encodings with horizontal flip in batch dimension for output
+        proj_encimg_list = []
+        for regular_enc, flipped_enc in zip(reg_encimg_list, flip_encimg_list):
+            batch_combined_encs = torch.concat((regular_enc, torch.flipud(flipped_enc)), dim=0)
+            proj_encimg_list.append(batch_combined_encs)
+
+        # Compute 'raw' encodings
+        # -> Works by manually running the image encoder, without the final projection step
+        image_tensor_bchw = model.image_encoder.prepare_image(image_bgr, imgenc_base_size, use_square_sizing)
+        flipped_image_bchw = model.image_encoder.prepare_image(hflip_image_bgr, imgenc_base_size, use_square_sizing)
+        result_tokens = []
+        for input_img in [image_tensor_bchw, flipped_image_bchw]:
+            raw_encoded_bchw = model.image_encoder(input_img)
+            result_tokens.append(raw_encoded_bchw)
+
+        # Combine regular 'raw' encoding with horizontal flip (stored in batch dimension)
+        reg_encimg, flip_encimg = result_tokens
+        raw_encimg = torch.concat((reg_encimg, torch.fliplr(flip_encimg)), dim=0)
+
+    return [raw_encimg], proj_encimg_list
 
 
 def encode_image_samv2(model, image_bgr, max_side_length=1024, use_square_sizing=True) -> tuple[list, list]:
@@ -85,13 +120,13 @@ def encode_image_samv2(model, image_bgr, max_side_length=1024, use_square_sizing
 
         # Compute 'raw' encodings
         # -> Works by manually running the image encoder, without the final projection step
-        image_tensor_bchw = sammodel.image_encoder.prepare_image(image_bgr, imgenc_base_size, use_square_sizing)
-        flipped_image_bchw = sammodel.image_encoder.prepare_image(hflip_image_bgr, imgenc_base_size, use_square_sizing)
+        image_tensor_bchw = model.image_encoder.prepare_image(image_bgr, imgenc_base_size, use_square_sizing)
+        flipped_image_bchw = model.image_encoder.prepare_image(hflip_image_bgr, imgenc_base_size, use_square_sizing)
         result_tokens = []
         for input_img in [image_tensor_bchw, flipped_image_bchw]:
-            patch_tokens_bchw = sammodel.image_encoder.patch_embed(input_img)
-            patch_tokens_bchw = sammodel.image_encoder.posenc(patch_tokens_bchw)
-            multires_tokens_bchw_list = sammodel.image_encoder.hiera(patch_tokens_bchw)
+            patch_tokens_bchw = model.image_encoder.patch_embed(input_img)
+            patch_tokens_bchw = model.image_encoder.posenc(patch_tokens_bchw)
+            multires_tokens_bchw_list = model.image_encoder.hiera(patch_tokens_bchw)
             result_tokens.append(multires_tokens_bchw_list)
 
         # Combine regular 'raw' encodings with horizontal flips
@@ -138,13 +173,13 @@ def encode_image_samv1(model, image_bgr, max_side_length=1024, use_square_sizing
 
         # Compute 'raw' encodings
         # -> Works by manually running the image encoder, without the final projection step
-        image_tensor_bchw = sammodel.image_encoder.prepare_image(image_bgr, imgenc_base_size, use_square_sizing)
-        flipped_image_bchw = sammodel.image_encoder.prepare_image(hflip_image_bgr, imgenc_base_size, use_square_sizing)
+        image_tensor_bchw = model.image_encoder.prepare_image(image_bgr, imgenc_base_size, use_square_sizing)
+        flipped_image_bchw = model.image_encoder.prepare_image(hflip_image_bgr, imgenc_base_size, use_square_sizing)
         result_tokens = []
         for input_img in [image_tensor_bchw, flipped_image_bchw]:
-            patch_tokens_bchw = sammodel.image_encoder.patch_embed(input_img)
-            tokens_bhwc = sammodel.image_encoder.posenc(patch_tokens_bchw).permute(0, 2, 3, 1)
-            raw_encoded_bchw = sammodel.image_encoder.stages(tokens_bhwc).permute(0, 3, 1, 2)
+            patch_tokens_bchw = model.image_encoder.patch_embed(input_img)
+            tokens_bhwc = model.image_encoder.posenc(patch_tokens_bchw).permute(0, 2, 3, 1)
+            raw_encoded_bchw = model.image_encoder.stages(tokens_bhwc).permute(0, 3, 1, 2)
             result_tokens.append(raw_encoded_bchw)
 
         # Combine regular 'raw' encodings with horizontal flips
@@ -212,7 +247,7 @@ default_image_path_2 = None
 default_model_path = None
 default_prompts_path = None
 default_display_size = 900
-default_base_size = 1024
+default_base_size = None
 
 # Define script arguments
 parser = argparse.ArgumentParser(description="Visualize similarity of SAM image tokens between two images")
@@ -259,7 +294,7 @@ parser.add_argument(
     "--base_size_px",
     default=default_base_size,
     type=int,
-    help=f"Override base model size (default {default_base_size})",
+    help="Set image processing size (will use model default if not set)",
 )
 parser.add_argument(
     "--hide_info",
@@ -272,6 +307,18 @@ parser.add_argument(
     default=False,
     action="store_true",
     help="If set, the same image will be used for both prompting/masking & similarity comparison",
+)
+parser.add_argument(
+    "--hstack",
+    default=False,
+    action="store_true",
+    help="Force images to stack horizontally",
+)
+parser.add_argument(
+    "--vstack",
+    default=False,
+    action="store_true",
+    help="Force images to stack vertically",
 )
 
 # For convenience
@@ -287,6 +334,8 @@ use_square_sizing = not args.use_aspect_ratio
 imgenc_base_size = args.base_size_px
 show_info = not args.hide_info
 use_same_image = args.same
+force_hstack = args.hstack
+force_vstack = args.vstack
 
 # Set up device config
 device_config_dict = make_device_config(device_str, use_float32)
@@ -319,7 +368,6 @@ model_name = osp.basename(model_path)
 print("", "Loading model weights...", f"  @ {model_path}", sep="\n", flush=True)
 model_config_dict, sammodel = make_sam_from_state_dict(model_path)
 sammodel.to(**device_config_dict)
-is_v2_model = isinstance(sammodel, SAMV2Model)
 
 # Load reference image
 image_bgr_a = cv2.imread(image_path_a)
@@ -337,12 +385,38 @@ if image_bgr_b is None:
         print("", "Unable to load image!", f"  @ {image_path_b}", sep="\n", flush=True)
         raise FileNotFoundError(osp.basename(image_path_b))
 
+# Determine stacking direction
+use_hstack_images = None
+if force_hstack:
+    use_hstack_images = True
+elif force_vstack:
+    use_hstack_images = False
+else:
+    img_a_h, img_a_w = image_bgr_a.shape[0:2]
+    img_b_h, img_b_w = image_bgr_b.shape[0:2]
+    have_narrow_img = (img_a_h > img_a_w) or (img_b_h > img_b_w)
+    use_hstack_images = have_narrow_img
+
 
 # ---------------------------------------------------------------------------------------------------------------------
 # %% Initial model run
 
+# Determine which image encoding function to use
+is_v1_model, is_v2_model, is_v3_model = False, False, False
+encode_image_func = None
+if sammodel.name == "samv3":
+    is_v3_model = True
+    encode_image_func = encode_image_samv3
+elif sammodel.name == "samv2":
+    is_v2_model = True
+    encode_image_func = encode_image_samv2
+elif sammodel.name == "samv1":
+    is_v1_model = True
+    encode_image_func = encode_image_samv1
+else:
+    raise TypeError("Unknown model type (expecting SAMv1, v2 or v3)")
+
 # Run Model
-encode_image_func = encode_image_samv2 if is_v2_model else encode_image_samv1
 imgenc_config_dict = {"max_side_length": imgenc_base_size, "use_square_sizing": use_square_sizing}
 print("", "Encoding image data...", sep="\n", flush=True)
 t1 = perf_counter()
@@ -359,7 +433,7 @@ encoded_img_a = [enc[[0]] for enc in proj_enc_a]
 encoded_img_b = [enc[[0]] for enc in proj_enc_b]
 
 # Remove list indexing for SAMv1 models, which normally don't have this!
-if not is_v2_model:
+if is_v1_model:
     encoded_img_a = encoded_img_a[0]
     encoded_img_b = encoded_img_b[0]
 
@@ -406,7 +480,7 @@ similarity_btn.style(on_color=(70, 30, 120), off_color=(50, 40, 60))
 max_enc_idx = max(len(proj_enc_a), len(raw_enc_a)) - 1
 encoding_select_slider = HSlider(
     "Encoding resolution",
-    initial_value=min(1, max_enc_idx),
+    initial_value=0,
     min_value=0,
     max_value=max_enc_idx,
     step_size=1,
@@ -429,7 +503,7 @@ footer_msgbar = StaticMessageBar(
     "[r] Raw features",
     "[h] H-Flip",
     "[tab] Similarity",
-    "[, .] Change encoding" if is_v2_model else None,
+    "[, .] Change encoding" if (not is_v1_model) else None,
     text_scale=0.35,
     space_equally=True,
 )
@@ -438,12 +512,13 @@ footer_msgbar = StaticMessageBar(
 cmap_bar = HColormapsBar(cv2.COLORMAP_INFERNO, cv2.COLORMAP_VIRIDIS, make_spectral_colormap(), None)
 
 # Set up full display layout
+StackElem: HStack | VStack = HStack if use_hstack_images else VStack
 disp_layout = VStack(
     header_msgbar if show_info else None,
     cmap_bar,
-    HStack(ui_elems.layout, comp_img_elem),
+    StackElem(ui_elems.layout, comp_img_elem),
     HStack(swap_images_btn if not use_same_image else None, hflip_btn, raw_feats_btn, similarity_btn),
-    encoding_select_slider if is_v2_model else None,
+    encoding_select_slider if (not is_v1_model) else None,
     norm_range_slider,
     footer_msgbar if show_info else None,
 )
@@ -565,12 +640,11 @@ try:
         if need_update_similarity:
 
             # For clarity, set up indexing into raw vs. projection encodings
-            # -> This only matters for SAMv2, which outputs multi-stage encodings
-            # -> Projection index is offset from raw index to try to match encoding resolutions
-            #    i.e. raw index X has a resolution matching proj index X-1,
-            #    matching resolutions leads to a less jarring effect when toggling raw vs. proj. display
+            # -> When using SAMv2, we use encoding selector to choose raw-indexing,
+            #    then set projection index to 1 less (there are 4 raw encodings, 3 projection encodings),
+            #    as this leads to a less jarring efect when toggling raw vs. proj. display
             raw_idx = min(encoding_select_idx, len(raw_enc_ref) - 1)
-            proj_idx = max(raw_idx - 1, 0)
+            proj_idx = max(raw_idx - 1, 0) if is_v2_model else encoding_select_idx
 
             # Pick appropriate encodings based on control settings
             # There are 4 options: projection encodings + hflip, project + no hflip, raw + hflip, raw + no hflip

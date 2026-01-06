@@ -7,16 +7,16 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
+        raise ImportError("Can't find path to muggled_sam folder!")
 
 import argparse
 import os.path as osp
@@ -24,21 +24,19 @@ import os.path as osp
 import torch
 import cv2
 
-from lib.make_sam import make_sam_from_state_dict
-from lib.v1_sam.sam_v1_model import SAMV1Model
-from lib.v2_sam.sam_v2_model import SAMV2Model
+from muggled_sam.make_sam import make_sam_from_state_dict
 
-from lib.demo_helpers.ui.window import DisplayWindow, KEY
-from lib.demo_helpers.ui.base import force_same_min_width
-from lib.demo_helpers.ui.layout import HStack, VStack
-from lib.demo_helpers.ui.buttons import ToggleButton
-from lib.demo_helpers.ui.sliders import HSlider
-from lib.demo_helpers.ui.static import StaticMessageBar, HSeparator
-from lib.demo_helpers.ui.images import ExpandingImage
+from muggled_sam.demo_helpers.ui.window import DisplayWindow, KEY
+from muggled_sam.demo_helpers.ui.base import force_same_min_width
+from muggled_sam.demo_helpers.ui.layout import HStack, VStack
+from muggled_sam.demo_helpers.ui.buttons import ToggleButton
+from muggled_sam.demo_helpers.ui.sliders import HSlider
+from muggled_sam.demo_helpers.ui.static import StaticMessageBar, HSeparator
+from muggled_sam.demo_helpers.ui.images import ExpandingImage
 
-from lib.demo_helpers.history_keeper import HistoryKeeper
-from lib.demo_helpers.loading import ask_for_model_path_if_missing
-from lib.demo_helpers.misc import get_default_device_string, make_device_config, normalize_to_npuint8
+from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
+from muggled_sam.demo_helpers.loading import ask_for_model_path_if_missing
+from muggled_sam.demo_helpers.misc import get_default_device_string, make_device_config, normalize_to_npuint8
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -131,12 +129,13 @@ class PosencExtractor:
         new_position_encodings = px.make_new_encodings(patch_height=64, patch_height=32)
     """
 
-    def __init__(self, sam_model: SAMV1Model | SAMV2Model):
+    def __init__(self, sam_model):
 
         # Sanity check
-        is_v1_model = isinstance(sam_model, SAMV1Model)
-        is_v2_model = isinstance(sam_model, SAMV2Model)
-        assert is_v1_model or is_v2_model, "Unrecognized SAM model! Cannot access positional encodings..."
+        is_v1_model = sam_model.name == "samv1"
+        is_v2_model = sam_model.name == "samv2"
+        is_v3_model = sam_model.name == "samv3"
+        assert any((is_v1_model, is_v2_model, is_v3_model)), "Unrecognized model! Cannot access positional encodings..."
 
         # Try to 'reach in' to access function used to generate position encodings
         try:
@@ -159,7 +158,9 @@ class PosencExtractor:
 
         # Store reference to position encoder, in case we're modifying window tiling later
         self._posenc = posencoder
+        self.is_v1_model = is_v1_model
         self.is_v2_model = is_v2_model
+        self.is_v3_model = is_v3_model
 
     def make_new_encodings(self, patch_height, patch_width):
         """Re-computes positional encodings for the given height & width"""
@@ -180,10 +181,10 @@ class PosencExtractor:
         https://github.com/facebookresearch/segment-anything-2/blob/7e1596c0b6462eb1d1ba7e1492430fed95023598/sam2/modeling/backbones/hieradet.py#L269-L271
 
         The window tile encoding is specific to SAMv2, so this function
-        does nothing when using V1.
+        does nothing when using V1 or V3.
         """
 
-        # Only toggle when using V2 model, since V1 doesn't have a tiling component!
+        # Only toggle when using V2 model
         if self.is_v2_model:
 
             # Swap between using the tiling or not
@@ -193,14 +194,15 @@ class PosencExtractor:
             )
 
             # Force cache reset so old encodings aren't re-used
-            self._posenc.cached_encoding_bhwc = torch.empty((1, 1, 1, 1))
+            self._posenc.cached_encoding_bchw = torch.zeros((1, 1, 1, 1))
 
         return self
 
 
 # Set up extractor and create example encoding for feature size information
 posextract = PosencExtractor(sammodel)
-example_posenc_bchw = posextract.make_new_encodings(64, 64)
+base_h, base_w = (72, 72) if posextract.is_v3_model else (64, 64)
+example_posenc_bchw = posextract.make_new_encodings(base_h, base_w)
 _, features_per_token, _, _ = example_posenc_bchw.shape
 is_v2_model = posextract.is_v2_model
 
@@ -225,8 +227,8 @@ norm_image_elem = ExpandingImage(posenc_norm_uint8)
 init_idx, feat_marker_steps = features_per_token // 2, (1 + (features_per_token // 10) // 10) * 10
 tile_toggle_btn = ToggleButton("Include Window Tiling", on_color=(50, 120, 140), default_state=True, text_scale=0.35)
 feature_slider = HSlider("Feature Index", init_idx, 0, features_per_token - 1, 1, marker_steps=feat_marker_steps)
-height_slider = HSlider("Height", 64, 2, 128, 1, marker_steps=8)
-width_slider = HSlider("Width", 64, 2, 128, 1, marker_steps=8)
+height_slider = HSlider("Height", base_h, 2, 2 * base_h, 1, marker_steps=8)
+width_slider = HSlider("Width", base_w, 2, 2 * base_w, 1, marker_steps=8)
 
 # If using v2 model, include tile toggle beside feature slider (toggle is not rendered for v1 models)
 feature_bar = feature_slider

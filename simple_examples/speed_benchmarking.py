@@ -3,30 +3,30 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
+        raise ImportError("Can't find path to muggled_sam folder!")
 import os
 import torch
 import numpy as np
 from time import perf_counter
-from lib.make_sam import make_sam_from_state_dict
+from muggled_sam.make_sam import make_sam_from_state_dict
 
 # Define pathing
-model_path = "/path/to/sam_v1_or_v2_model.pth"
+model_path = "/path/to/model.pth"
 device, dtype = "cpu", torch.float32
 if torch.cuda.is_available():
     device, dtype = "cuda", torch.bfloat16
 
 # Image encoder settings
-max_side_length = 1024
+max_side_length = None
 use_square_sizing = True
 
 # Benchmarking settings
@@ -38,6 +38,12 @@ if device == "cpu":
     num_image_encoder_iterations = num_image_encoder_iterations // 10
     num_mask_generation_iterations = num_mask_generation_iterations // 10
 
+# Get initial VRAM usage
+initial_vram_mb = 0
+if "cuda" in device:
+    free_vram_bytes, total_vram_bytes = torch.cuda.mem_get_info()
+    initial_vram_mb = (total_vram_bytes - free_vram_bytes) // 1_000_000
+
 # Set up model
 print(f"Loading model ({os.path.basename(model_path)})")
 t1 = perf_counter()
@@ -45,6 +51,13 @@ model_config_dict, sammodel = make_sam_from_state_dict(model_path)
 sammodel.to(device=device, dtype=dtype)
 t2 = perf_counter()
 print("-> Loading took", round(1000 * (t2 - t1)), "ms")
+
+# Fill in missing processing size, if needed
+if max_side_length is None:
+    prep_img = np.zeros((10, 10, 3), dtype=np.uint8)
+    prep_tensor = sammodel.image_encoder.prepare_image(prep_img, None, use_square_sizing)
+    max_side_length = int(max(prep_tensor.shape[-2:]))
+print("", f"Using max side length: {max_side_length}px", f"Square sizing: {use_square_sizing}", sep="\n", flush=True)
 
 # Model warm-up (excludes one-time VRAM/cache allocation from timing)
 print("", f"Running warm-up ({device} / {dtype})", sep="\n", flush=True)
@@ -80,3 +93,10 @@ t2 = perf_counter()
 total_time_ms = round(1000 * (t2 - t1))
 per_iter = total_time_ms / num_mask_generation_iterations
 print("-> Mask generation took", total_time_ms, "ms", f"({per_iter} ms / iter)")
+
+# Print VRAM usage if possible
+if "cuda" in device:
+    free_vram_bytes, total_vram_bytes = torch.cuda.mem_get_info()
+    curr_vram_mb = (total_vram_bytes - free_vram_bytes) // 1_000_000
+    vram_usage = curr_vram_mb - initial_vram_mb
+    print("", f"VRAM: {vram_usage} MB", sep="\n")

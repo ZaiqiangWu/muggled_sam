@@ -13,26 +13,25 @@ import torch
 import cv2
 import numpy as np
 
-from lib.make_sam import make_sam_from_state_dict
+from muggled_sam.make_sam import make_sam_from_state_dict
 
-from lib.demo_helpers.ui.window import DisplayWindow, KEY
-from lib.demo_helpers.ui.layout import HStack, VStack
-from lib.demo_helpers.ui.buttons import ToggleButton, ImmediateButton
-from lib.demo_helpers.ui.sliders import HSlider
-from lib.demo_helpers.ui.static import StaticMessageBar
-from lib.demo_helpers.ui.base import force_same_min_width
+from muggled_sam.demo_helpers.ui.window import DisplayWindow, KEY
+from muggled_sam.demo_helpers.ui.layout import HStack, VStack
+from muggled_sam.demo_helpers.ui.buttons import ToggleButton, ImmediateButton
+from muggled_sam.demo_helpers.ui.sliders import HSlider
+from muggled_sam.demo_helpers.ui.static import StaticMessageBar
+from muggled_sam.demo_helpers.ui.base import force_flex_min_width, force_same_min_width
 
-from lib.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI, ReusableBaseImage
-from lib.demo_helpers.crop_ui import run_crop_ui
-from lib.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
+from muggled_sam.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI, ReusableBaseImage
+from muggled_sam.demo_helpers.crop_ui import run_crop_ui
+from muggled_sam.demo_helpers.video_frame_select_ui import run_video_frame_select_ui
 
-from lib.demo_helpers.contours import MaskContourData
-from lib.demo_helpers.mask_postprocessing import MaskPostProcessor
+from muggled_sam.demo_helpers.mask_postprocessing import MaskPostProcessor
 
-from lib.demo_helpers.history_keeper import HistoryKeeper
-from lib.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing, load_init_prompts
-from lib.demo_helpers.saving import save_image_segmentation, get_save_name, make_prompt_save_data
-from lib.demo_helpers.misc import (
+from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
+from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing, load_init_prompts
+from muggled_sam.demo_helpers.saving import save_image_segmentation, get_save_name, make_prompt_save_data
+from muggled_sam.demo_helpers.misc import (
     get_default_device_string,
     make_device_config,
     get_total_cuda_vram_usage_mb,
@@ -49,9 +48,8 @@ default_model_path = None
 default_prompts_path = None
 default_mask_hint_path = None
 default_display_size = 900
-default_base_size = 1024
-default_window_size = 16
-default_show_iou_preds = False
+default_base_size = None
+default_simplify = 0.0
 
 # Define script arguments
 parser = argparse.ArgumentParser(description="Script used to run Segment-Anything (SAM) on a single image")
@@ -103,14 +101,20 @@ parser.add_argument(
     "--base_size_px",
     default=default_base_size,
     type=int,
-    help=f"Override base model size (default {default_base_size})",
+    help="Set image processing size (will use model default if not set)",
+)
+parser.add_argument(
+    "-l",
+    "--simplify",
+    default=default_simplify,
+    type=float,
+    help="Set starting 'simplify' setting (value between 0 and 1)",
 )
 parser.add_argument(
     "-q",
-    "--quality_estimate",
-    default=default_show_iou_preds,
-    action="store_false" if default_show_iou_preds else "store_true",
-    help="Hide mask quality estimates" if default_show_iou_preds else "Show mask quality estimates",
+    "--hide_iou",
+    action="store_true",
+    help="Hide mask quality estimates",
 )
 parser.add_argument(
     "--hide_info",
@@ -143,7 +147,8 @@ device_str = args.device
 use_float32 = args.use_float32
 use_square_sizing = not args.use_aspect_ratio
 imgenc_base_size = args.base_size_px
-show_iou_preds = args.quality_estimate
+init_simplify = args.simplify
+show_iou_preds = not args.hide_iou
 show_info = not args.hide_info
 disable_promptless_masks = not args.enable_promptless_masks
 enable_crop_ui = args.crop
@@ -292,8 +297,12 @@ bridge_slider = HSlider("Bridge Gaps", 0, -50, 50, 1, marker_steps=5)
 small_hole_slider = HSlider("Remove holes", 0, 0, 100, 1, marker_steps=20)
 small_island_slider = HSlider("Remove islands", 0, 0, 100, 1, marker_steps=20)
 padding_slider = HSlider("Pad contours", 0, -50, 50, 1, marker_steps=5)
+simplify_slider = HSlider("Simplify contours", init_simplify, 0, 1, 0.01, marker_steps=25)
+simplify_to_perimeter_btn = ToggleButton("By-Perimeter", text_scale=0.5, default_state=True)
 
+# Set up sizing constraints
 force_same_min_width(small_hole_slider, small_island_slider)
+force_flex_min_width(simplify_slider, simplify_to_perimeter_btn, flex=(3, 1))
 
 # Set up full display layout
 disp_layout = VStack(
@@ -304,6 +313,7 @@ disp_layout = VStack(
     bridge_slider,
     HStack(small_hole_slider, small_island_slider),
     padding_slider,
+    HStack(simplify_slider, simplify_to_perimeter_btn),
     footer_msgbar if show_info else None,
 ).set_debug_name("DisplayLayout")
 
@@ -383,9 +393,12 @@ try:
         _, mislands = small_island_slider.read()
         _, mbridge = bridge_slider.read()
         _, mpadding = padding_slider.read()
+        _, msimplify = simplify_slider.read()
+        _, mperimeter = simplify_to_perimeter_btn.read()
 
         # Update post-processor based on control values
-        mask_postprocessor.update(mholes, mislands, mbridge, mpadding)
+        scaled_msimplify = (msimplify**2) * 0.01
+        mask_postprocessor.update(mholes, mislands, mbridge, mpadding, scaled_msimplify, mperimeter)
 
         # Only run the model when an input affecting the output has changed!
         need_prompt_encode = is_prompt_changed or is_mhint_changed
@@ -447,7 +460,7 @@ try:
             raw_mask_result_uint8 = uictrl.create_hires_mask_uint8(mask_preds, mselect_idx, loaded_hw, mthresh)
 
             # Generate & save segmentation images!
-            save_folder, save_idx = get_save_name(image_path, "manual")
+            save_folder, save_idx = get_save_name(image_path, "run_image")
             save_image_segmentation(
                 save_folder,
                 save_idx,

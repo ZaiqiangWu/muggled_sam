@@ -3,21 +3,19 @@
 
 # This is a hack to make this script work from outside the root project folder (without requiring install)
 try:
-    import lib  # NOQA
+    import muggled_sam  # NOQA
 except ModuleNotFoundError:
     import os
     import sys
 
     parent_folder = os.path.dirname(os.path.dirname(__file__))
-    if "lib" in os.listdir(parent_folder):
+    if "muggled_sam" in os.listdir(parent_folder):
         sys.path.insert(0, parent_folder)
     else:
-        raise ImportError("Can't find path to lib folder!")
-
+        raise ImportError("Can't find path to muggled_sam folder!")
 import cv2
 import torch
-from lib.make_sam import make_sam_from_state_dict
-
+from muggled_sam.make_sam import make_sam_from_state_dict
 
 # Setup
 batch_size = 4
@@ -45,9 +43,13 @@ sammodel.to(device=device, dtype=dtype)
 # Set up image batch by just repeating the single input image
 print(f"Encoding image batch... (batch size: {batch_size})")
 with torch.inference_mode():
-    image_tensor = sammodel.image_encoder.prepare_image(img_bgr, max_side_length=1024, use_square_sizing=True)
+    image_tensor = sammodel.image_encoder.prepare_image(img_bgr, max_side_length=None, use_square_sizing=True)
     image_batch = image_tensor.repeat(batch_size, 1, 1, 1)
     encoded_img = sammodel.image_encoder(image_batch)
+
+    # SAMv3 requires a 'samv2' projection step when used for direct mask predictions
+    if sammodel.name == "samv3":
+        encoded_img = sammodel.image_projection.project_v2(encoded_img)
 
 # Process data
 print("Generating masks...")
