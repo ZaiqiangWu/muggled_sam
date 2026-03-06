@@ -1,0 +1,1 @@
+Shift + click to place multiple points
