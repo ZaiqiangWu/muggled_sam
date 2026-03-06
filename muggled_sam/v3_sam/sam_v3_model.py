@@ -6,6 +6,7 @@
 # %% Imports
 
 import os.path as osp
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -61,10 +62,14 @@ class SAMV3Model(nn.Module):
         image_exemplar_fusion_model: SAMV3ImageExemplarFusion,
         exemplar_detector_model: SAMV3ExemplarDetector,
         exemplar_segmentation_model: SAMV3ExemplarSegmentation,
+        config_bytes: bytearray,
     ):
 
         # Inherit from parent
         super().__init__()
+
+        # Store config data
+        self.config_muggled_samv3 = nn.Parameter(torch.tensor(config_bytes, dtype=torch.uint8), requires_grad=False)
 
         # Store base SAM components
         self.image_encoder = image_encoder_model
@@ -305,12 +310,26 @@ class SAMV3Model(nn.Module):
 
     def initialize_from_mask(self, encoded_image_features_list: list[Tensor], mask_image: ndarray | Tensor) -> Tensor:
         """
-        Alternate video tracking initialization option. In this case, using a provided mask image as a 'prompt'.
-        The provided image is assumed to be loaded using opencv, so that it has shape: HxW or HxWxC
-        If the image has channels (e.g. RGB), only the 0th channel (e.g. red) will be used.
+        Alternate video tracking initialization option. In this case, using a provided mask image as a 'prompt'
+        to begin tracking an object.
+
+        The provided mask can either be a numpy array (e.g. image loaded using opencv) or
+        a pytorch tensor (e.g. output from another model). In the simplest cases, a boolean
+        mask should be provided with shape: HxW. If a non-boolean input is given, it will
+        be converted to a boolean mask used a simple 'greater than 0' check
+        (e.g. bool_mask = mask_image > 0).
+
+        - If a mask is given with 3 dimensions, but the last dimension has size <= 3, it's assumed
+          to be shaped as: HxWxC (e.g. a BGR image from opencv). In this case, the 0-th entry
+          of the 3rd dimension will be taken as the (HxW) mask
+        - If a mask is given with 3 dimensions, but the last dimension has size > 3, it's assumed
+          to be shaped as: BxHxW, which is acceptable though batch sizes > 1 may not
+          be directly supported when performing video segmentation steps!
+        - If a mask is given with 4 dimensions, it will be interpretted as: Bx1xHxW, where it
+          must have size '1' in the second-most dimension.
 
         Note that with this form of initializtion, there is no object pointer! The pointer normally
-        comes from the mask prediction, so without a prediction, there is not pointer. The video
+        comes from the mask prediction, so without a prediction, there is no pointer. The video
         masking should therefore be initialized with only the memory encoding and an empty pointer list.
         This doesn't have a substantial impact on the tracking
 
@@ -535,7 +554,7 @@ class SAMV3DetectorModel(nn.Module):
         image_bgr: ndarray,
         max_side_length: int | None = None,
         use_square_sizing: bool = True,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[list[Tensor], tuple[int, int], tuple[int, int]]:
         """
         Function used to compute image encodings from a bgr formatted image (e.g. loaded from opencv)
         The max_side_length setting is used to set the size at which the image is processed, if
@@ -649,6 +668,7 @@ class SAMV3DetectorModel(nn.Module):
         encoded_exemplars_bnc: Tensor,
         detection_filter_threshold: float = 0.0,
         exemplar_padding_mask_bn: Tensor | None = None,
+        blank_no_exemplar_outputs: bool = True,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Takes in encoded image features and exemplar tokens, along with an optional padding mask,
@@ -688,6 +708,14 @@ class SAMV3DetectorModel(nn.Module):
         lowres_imgenc_bchw, hiresx2_imgenc_bchw, hiresx4_imgenc_bchw = encoded_image_features_list
 
         with torch.inference_mode():
+
+            # Return 'blank' results if we don't get any exemplars
+            # -> Not required (model still works with no exemplars), but blanked results make more sense
+            no_exemplars = encoded_exemplars_bnc.shape[1] == 0
+            if no_exemplars and blank_no_exemplar_outputs:
+                blk_tok, blk_box, blk_score, blk_pres = self.exemplar_detector.create_blank_output(lowres_imgenc_bchw)
+                blk_masks, _ = self.exemplar_segmentation.create_blank_output(blk_tok, lowres_imgenc_bchw)
+                return blk_masks, blk_box, blk_score, blk_pres
 
             # Mix exemplar data into image tokens
             fused_imgexm_tokens_bchw = self.image_exemplar_fusion(
@@ -761,6 +789,148 @@ class SAMV3DetectorModel(nn.Module):
 
     # .................................................................................................................
 
+    def encode_tracking_and_detection_image(
+        self,
+        image_bgr: ndarray,
+        max_side_length: int | None = None,
+        use_square_sizing: bool = True,
+    ) -> tuple[Tensor, Tensor]:
+        """
+        ***Special case function***
+
+        This function is used to compute both the image encodings needed for tracking
+        AND the features for detections, from a bgr formatted input image (e.g. loaded from opencv).
+        It is purely for optimization purposes when combining SAMv3 detections with video tracking.
+
+        This is equivalent to running .encode_image(...) and .encode_detection_image(...)
+        using the SAMv3 model and detection variant (respectively). However, this approach
+        is much more efficient, as the heaviest part of this encoding can be shared between
+        both outputs, so only needs to be computed once.
+
+        Note that the return format is slightly different from the original encoding functions!
+
+        Returns:
+            encoded_tracking_features_list, encoded_detection_features_list
+
+        -> Both outputs contain 3 multi-resolution feature maps
+        -> The tracking features have shapes: Bx256xHxW, Bx64x(2H)x(2W) & Bx32x(4H)x(4W)
+           The detection features have shapes: Bx256xHxW, Bx256x(2H)x(2W) & Bx256x(4H)x(4W)
+        -> Where H & W are the 'low-res' feature map size (72x72 by default)
+
+        The tracking features are the ones used in video tracking (e.g. inside the 'step_video_masking' function)
+        while the detection features are used in the exemplar encoding and generate detections functions.
+        """
+
+        with torch.inference_mode():
+            image_rgb_normalized_bchw = self.image_encoder.prepare_image(image_bgr, max_side_length, use_square_sizing)
+            encoded_img = self.image_encoder(image_rgb_normalized_bchw)
+            tracking_features_list = self.image_projection.v2_projection(encoded_img)
+            detection_features_list = self.image_projection.v3_projection(encoded_img)
+
+        return tracking_features_list, detection_features_list
+
+    # .................................................................................................................
+
+    def enable_compilation(
+        self,
+        example_image_bgr: ndarray | None = None,
+        max_side_length: int | None = None,
+        use_square_sizing: bool = True,
+        compile_image_encoding: bool = True,
+        compile_exemplar_encoding: bool = True,
+        compile_detection_segmentation: bool = True,
+        custom_config: dict | None = None,
+    ) -> int:
+        """
+        Enable (experimental) compilation of model components.
+        Anecdotally, this seems to give around a 10% reduction in
+        inference time of large components and 30-40% reduction for
+        smaller components, though this is likely dependent on hardware!
+
+        Note that any adjustments to model usage (e.g. different input parameters)
+        after calling this function may result in re-compilation.
+
+        The 'custom_config' input can be given to provide custom compilation
+        settings. This is used as:
+            torch.compile(<model_code>, **custom_config)
+        If not provided, some (fairly aggressive) default settings will be used.
+
+        Compilation for certain components can be toggled on/off using the
+        'compile_image_encoding' and similar args. This can be useful to disable
+        heavy compilation on components that are only called once for example.
+        This can also be used to provide different custom compilation configs
+        to different model components, if needed.
+
+        Returns:
+            total_time_taken_ms
+        """
+
+        # Special optimization to speed up float32 usage
+        if next(self.parameters()).dtype == torch.float32:
+            torch.set_float32_matmul_precision("high")
+
+        # Fill in default compilation settings
+        comp_kwargs = custom_config
+        dyncomp_kwargs = custom_config
+        if custom_config is None:
+            compile_options = {
+                "shape_padding": True,
+                "epilogue_fusion": True,
+                "max-autotune": True,
+            }
+            comp_kwargs = {"mode": None, "fullgraph": True, "options": compile_options}
+            dyncomp_kwargs = {**comp_kwargs, "dynamic": True}
+
+        # Create dummy arguments to run model
+        exm_args_1 = ("visual", [[(0.2, 0.3), (0.5, 0.6)]], [(0.5, 0.5)], [[(0.1, 0.1), (0.2, 0.2)]], [(0.9, 0.1)])
+        exm_args_2 = ("visual", None, None, None, None)
+        exm_args_3 = (None, *exm_args_1[1:])
+        if example_image_bgr is None:
+            example_image_bgr = np.zeros((1, 1, 3), dtype=np.uint8)
+
+        # Switch away from using complex numbers (not well supported by compiler)
+        if compile_image_encoding:
+            self.image_encoder.toggle_use_complex_numbers(False)
+
+        # Run model to fill caches
+        encoded_imgs, _, _ = self.encode_detection_image(example_image_bgr, max_side_length, use_square_sizing)
+        encoded_exemplars = self.encode_exemplars(encoded_imgs, *exm_args_1)
+        self.generate_detections(encoded_imgs, encoded_exemplars)
+
+        # Start timing
+        t1 = perf_counter()
+
+        if compile_image_encoding:
+            self.image_encoder.forward = torch.compile(self.image_encoder.forward, **comp_kwargs)
+            self.image_projection.v3_projection = torch.compile(self.image_projection.v3_projection, **comp_kwargs)
+
+        if compile_exemplar_encoding:
+            self.text_encoder.transformer.forward = torch.compile(
+                self.text_encoder.transformer.forward, **dyncomp_kwargs
+            )
+            self.sampling_encoder.fusion_transformer.forward = torch.compile(
+                self.sampling_encoder.fusion_transformer.forward, **dyncomp_kwargs
+            )
+            self.image_exemplar_fusion.forward = torch.compile(self.image_exemplar_fusion.forward, **dyncomp_kwargs)
+
+        if compile_detection_segmentation:
+            self.exemplar_detector.forward = torch.compile(self.exemplar_detector.forward, **dyncomp_kwargs)
+            self.exemplar_segmentation.forward = torch.compile(self.exemplar_segmentation.forward, **dyncomp_kwargs)
+
+        # Compilation doesn't occur until we actually run the model!
+        for exm_args in [exm_args_3, exm_args_2, exm_args_1]:
+            encoded_imgs, _, _ = self.encode_detection_image(example_image_bgr, max_side_length, use_square_sizing)
+            encoded_exemplars = self.encode_exemplars(encoded_imgs, *exm_args)
+            self.generate_detections(encoded_imgs, encoded_exemplars)
+
+        # Finish timing
+        t2 = perf_counter()
+        time_taken_ms = round(1000 * (t2 - t1))
+
+        return time_taken_ms
+
+    # .................................................................................................................
+
     def forward(self, *args, **kwargs) -> None:
         """
         Placeholder to prevent users from trying to call this model using the forward function.
@@ -790,3 +960,60 @@ class SAMV3DetectorModel(nn.Module):
         raise NotImplementedError("This model isn't meant to be used with .forward(...)")
 
     # .................................................................................................................
+
+    @staticmethod
+    def make_exemplar_batch(*encoded_exemplars_bnc: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Function which takes in multiple encoded exemplars and produces
+        a single 'batched' set of exemplar tokens.
+        The encoded tokens are expected to come from calling:
+            model.encode_exemplars(...)
+
+        Note that exemplar tokens will generally be different sizes
+        and so will require a padding mask, which is also returned
+        by this function.
+
+        Returns:
+            batched_exemplar_tokens_bnc, exemplar_padding_mask_bn
+        """
+
+        # Get info about all tokens for batching
+        device_dtype_list = []
+        batch_size_list = []
+        num_tokens_list = []
+        channel_counts_list = []
+        for tokens_bnc in encoded_exemplars_bnc:
+            assert tokens_bnc.ndim == 3, f"Expecting exmplars to have shape: BxNxC, got: {tokens_bnc.shape}"
+            b, n, c = tokens_bnc.shape
+            batch_size_list.append(b)
+            num_tokens_list.append(n)
+            channel_counts_list.append(c)
+            device_dtype_list.append((tokens_bnc.device, tokens_bnc.dtype))
+
+        # Figure out data sizing/config
+        total_batch_size = sum(batch_size_list)
+        max_num_tokens = max(num_tokens_list)
+        num_channels = channel_counts_list[0]
+        device, dtype = device_dtype_list[0]
+
+        # Sanity checks
+        all_same_channel_count = all(c == num_channels for c in channel_counts_list)
+        all_same_device_and_dtype = all(d == device and t == dtype for d, t in device_dtype_list)
+        assert all_same_channel_count, f"Error, got different exemplar channel counts ({channel_counts_list})"
+        assert all_same_device_and_dtype, f"Error, got different exemplar device/dtypes ({device_dtype_list})"
+
+        # Create single batched tensor & corresponding padding mask
+        next_batch_idx = 0
+        batched_tokens_bnc = torch.zeros((total_batch_size, max_num_tokens, num_channels), device=device, dtype=dtype)
+        padding_mask_bn = torch.ones((total_batch_size, max_num_tokens), device=device, dtype=torch.bool)
+        for tokens_bnc in encoded_exemplars_bnc:
+            # Figure out batch indexing (doing it this way allows us to take in already-batched tokens!)
+            b, n, _ = tokens_bnc.shape
+            b_slice = slice(next_batch_idx, next_batch_idx + b)
+            next_batch_idx += b
+
+            # Fill in batched data & mask
+            batched_tokens_bnc[b_slice, :n, :] = tokens_bnc
+            padding_mask_bn[b_slice, :n] = False
+
+        return batched_tokens_bnc, padding_mask_bn

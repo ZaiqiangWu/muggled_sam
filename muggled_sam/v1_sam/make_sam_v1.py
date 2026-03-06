@@ -5,6 +5,7 @@
 # ---------------------------------------------------------------------------------------------------------------------
 # %% Imports
 
+import json
 import torch
 
 from .sam_v1_model import SAMV1Model
@@ -15,7 +16,7 @@ from .prompt_encoder_model import SAMV1PromptEncoder
 from .mask_decoder_model import SAMV1MaskDecoder
 
 from .state_dict_conversion.config_from_original_state_dict import get_model_config_from_state_dict
-from .state_dict_conversion.convert_original_state_dict_keys import convert_state_dict_keys
+from .state_dict_conversion.convert_original_state_dict_keys import SAM1ModuleType, convert_state_dict_keys
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -62,16 +63,67 @@ def make_samv1_from_original_state_dict(
 
     # Get model config from weights (i.e. beit_large_512 vs beit_base_384) & convert to new keys/state dict
     model_config_dict = get_model_config_from_state_dict(original_state_dict)
-    new_state_dict = convert_state_dict_keys(model_config_dict, original_state_dict)
+    new_state_dict, _ = convert_state_dict_keys(model_config_dict, original_state_dict)
 
     # Load model & set model weights
     sam_model = make_sam_v1(**model_config_dict)
-    sam_model.image_encoder.load_state_dict(new_state_dict["imgencoder"], strict_load)
-    sam_model.coordinate_encoder.load_state_dict(new_state_dict["coordencoder"], strict_load)
-    sam_model.prompt_encoder.load_state_dict(new_state_dict["promptencoder"], strict_load)
-    sam_model.mask_decoder.load_state_dict(new_state_dict["maskdecoder"], strict_load)
+    sam_model.image_encoder.load_state_dict(new_state_dict[SAM1ModuleType.image_encoder], strict_load)
+    sam_model.coordinate_encoder.load_state_dict(new_state_dict[SAM1ModuleType.coordinate_encoder], strict_load)
+    sam_model.prompt_encoder.load_state_dict(new_state_dict[SAM1ModuleType.prompt_encoder], strict_load)
+    sam_model.mask_decoder.load_state_dict(new_state_dict[SAM1ModuleType.mask_decoder], strict_load)
 
     return model_config_dict, sam_model
+
+
+# .....................................................................................................................
+
+
+def make_samv1_from_muggled_state_dict(
+    muggled_state_dict: dict | str,
+    strict_load: bool = True,
+    weights_only: bool = True,
+) -> [dict, SAMV1Model]:
+    """
+    Similar to the '...from_original_state_dict' function, this function instantiates a
+    SAMV1 model from a state dictionary file (e.g. model weights) and automatically
+    handles setting up the model configuration/sizing parameters.
+
+    This variant of the function is meant for loading from weights that were directly
+    saved from a muggled-SAMV1 instance, rather than the original model weights.
+
+    The state dict can be provided directly (e.g. from state_dict = torch.load(...)) or
+    a string can be given, in which case it will be assumed to be a path to load the state dict
+
+    Returns:
+        model_config_dict, sam_v1_model
+    """
+
+    # If we're given a string, assume it's a path to the state dict
+    need_to_load = isinstance(muggled_state_dict, str)
+    if need_to_load:
+        path_to_state_dict = muggled_state_dict
+        # Load model weights with fail check in case weights are in cuda format and user doesn't have cuda
+        try:
+            muggled_state_dict = torch.load(path_to_state_dict, weights_only=weights_only)
+        except RuntimeError:
+            muggled_state_dict = torch.load(path_to_state_dict, map_location="cpu", weights_only=weights_only)
+
+    # Try to get config from state dict
+    config_key = "config_muggled_samv1"
+    config_as_tensor = muggled_state_dict.get(config_key, None)
+    if config_as_tensor is None:
+        raise KeyError(f"Cannot load model! State dict is missing configuration ({config_key})")
+
+    # Convert config from tensor->bytes->string/json->dictionary
+    config_as_bytes = bytearray(config_as_tensor.cpu().tolist())
+    config_as_str = config_as_bytes.decode()
+    config_dict = json.loads(config_as_str)
+
+    # Load model & set model weights
+    sam_model = make_sam_v1(**config_dict)
+    sam_model.load_state_dict(muggled_state_dict, strict_load)
+
+    return config_dict, sam_model
 
 
 # .....................................................................................................................
@@ -143,6 +195,11 @@ def make_sam_v1(
         num_decoder_blocks = 2
     """
 
+    # Convert config to byte-data so it can be stored with the model
+    config_dict = locals()
+    config_as_str = json.dumps(config_dict, separators=(",", ":"), indent=None)
+    config_bytes = bytearray(config_as_str.encode())
+
     # Construct model components
     imgenc_model = SAMV1ImageEncoder(
         features_per_image_token,
@@ -168,4 +225,4 @@ def make_sam_v1(
     )
 
     # Bundle components into complete SAM model!
-    return SAMV1Model(imgenc_model, coordenc_model, promptenc_model, maskdec_model)
+    return SAMV1Model(imgenc_model, coordenc_model, promptenc_model, maskdec_model, config_bytes)
