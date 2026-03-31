@@ -863,6 +863,15 @@ vreader.pause(False)
 
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
+# Check if ANY object has prompts
+has_any_prompts = any(
+    memory_list[objidx].check_has_prompts() for objidx in objiter
+)
+
+if not has_any_prompts:
+    print("No prompts found. Exiting without tracking.")
+    pbar.close()
+    exit(0)  # or return if inside a function
 # Tracking without UI
 prev_real_idx = -1
 with torch.inference_mode():
