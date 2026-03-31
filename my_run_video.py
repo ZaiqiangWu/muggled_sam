@@ -509,13 +509,16 @@ curr_state = STATES.PAUSED
 tran_state = STATES.NO_TRANSISTION
 try:
 
+    end_reached = False
+
     for is_paused, frame_idx, frame in vreader:
 
         # Update frame id
         frame_idx_text.set_value(f"{frame_idx}/{total_frames}")
 
         # Stop tracking at last frame
-        if frame_idx >= total_frames - 1:
+        if not end_reached and frame_idx >= total_frames - 1:
+            end_reached = True
             track_btn.toggle(False, flag_if_changed=False)
             vreader.pause(True)
             print("Reached end of video. Stopping tracking.")
