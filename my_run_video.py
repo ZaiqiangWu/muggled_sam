@@ -246,7 +246,7 @@ sammodel.to(**device_config_dict)
 vreader = ReversibleLoopingVideoReader(video_path).release()
 video_fps = vreader.get_fps()
 sample_frame = vreader.get_sample_frame()
-total_frames = vreader.get_total_frames()
+total_frames = vreader.total_frames
 if enable_crop_ui:
     print("", "Cropping enabled: Adjust box to select image area for further processing", sep="\n", flush=True)
     _, history_crop_tlbr = history.read("crop_tlbr_norm")
