@@ -868,8 +868,12 @@ with torch.inference_mode():
     for is_paused, frame_idx, frame in vreader:
         print(frame_idx)
 
+        real_frame_idx = frame_idx - 1
 
-        if frame_idx > total_frames:
+        if real_frame_idx < 0:
+            continue
+
+        if real_frame_idx >= total_frames:
             break
 
         # Encode frame
@@ -901,7 +905,7 @@ with torch.inference_mode():
 
             ok, png = cv2.imencode(".png", save_frame)
             if ok:
-                savebuffers_list[objidx].png_per_frame_dict[frame_idx] = png
+                savebuffers_list[objidx].png_per_frame_dict[real_frame_idx] = png
 
         pbar.update(1)
 
