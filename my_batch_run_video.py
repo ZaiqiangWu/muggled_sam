@@ -858,7 +858,7 @@ finally:
     vreader.release()
 
 vreader = ReversibleLoopingVideoReader(video_path).release()
-vreader.res
+#vreader.res
 vreader.pause(False)
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
