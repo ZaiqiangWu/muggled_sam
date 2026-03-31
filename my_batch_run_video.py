@@ -876,7 +876,7 @@ if not has_any_prompts:
 prev_real_idx = -1
 with torch.inference_mode():
     for is_paused, frame_idx, frame in vreader:
-        print(frame_idx)
+        #print(frame_idx)
 
         real_frame_idx = frame_idx - 1
 
