@@ -869,7 +869,7 @@ with torch.inference_mode():
         print(frame_idx)
 
 
-        if frame_idx >= total_frames:
+        if frame_idx > total_frames:
             break
 
         # Encode frame
