@@ -880,7 +880,7 @@ with torch.inference_mode():
                 encoded_img, **memory_list[objidx].to_dict()
             )
 
-            obj_score = float(obj_score.squeeze().cpu().numpy())
+            obj_score = float(obj_score.squeeze().cpu().float().numpy())
             tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
 
             # Store memory
