@@ -878,15 +878,25 @@ with torch.inference_mode():
 
             # ✅ HANDLE FRAME 0
             if frame_idx == 0:
-                selected_memory_dict = memory_list[objidx].to_dict()
+                # ✅ Use prompt-based segmentation (same as UI)
+                prompts = memory_list[objidx].prompts_buffer
 
-                obj_score, best_mask_idx, mask_preds, _, _ = sammodel.step_video_masking(
-                        encoded_img, **selected_memory_dict
-                    )
+                if len(prompts) == 0:
+                    continue
 
-                obj_score = float(obj_score.squeeze().cpu().numpy())
-                tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
+                encoded_prompts = sammodel.encode_prompts(*prompts)
 
+                mask_preds, _ = sammodel.generate_masks(
+                    encoded_img,
+                    encoded_prompts,
+                    mask_hint=None,
+                    blank_promptless_output=True,
+                )
+
+                tracked_mask_idx = maskresults_list[objidx].idx
+                obj_score = 1.0  # no score here, safe default
+
+                # ✅ update result
                 maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
             else:
 
