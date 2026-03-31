@@ -861,7 +861,6 @@ vreader = ReversibleLoopingVideoReader(video_path).release()
 vreader.pause(False)
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
-initialized = [False for _ in objiter]
 # Tracking without UI
 with torch.inference_mode():
     for is_paused, frame_idx, frame in vreader:
@@ -877,36 +876,32 @@ with torch.inference_mode():
             if not memory_list[objidx].check_has_prompts():
                 continue
 
-            # ✅ FIRST FRAME → initialize instead of step
-            if not initialized[objidx]:
-                obj_score, mem_enc, obj_ptr = None, None, None
+            # ✅ HANDLE FRAME 0
+            if frame_idx == 0:
+                selected_memory_dict = memory_list[objidx].to_dict()
 
-                _, mem_enc, obj_ptr = sammodel.initialize_video_masking(
-                        encoded_img,
-                        *memory_list[objidx].get_prompts(),  # important
-                        mask_index_select=maskresults_list[objidx].idx,
+                obj_score, best_mask_idx, mask_preds, _, _ = sammodel.step_video_masking(
+                        encoded_img, **selected_memory_dict
                     )
 
-                memory_list[objidx].store_prompt_result(frame_idx, mem_enc, obj_ptr)
+                obj_score = float(obj_score.squeeze().cpu().numpy())
+                tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
 
-                initialized[objidx] = True
+                maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
+            else:
 
-                continue  # skip saving this iteration (or handle separately)
+                obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = sammodel.step_video_masking(
+                    encoded_img, **memory_list[objidx].to_dict()
+                )
 
-            # ✅ NORMAL TRACKING
+                tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
+                maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
 
-            obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = sammodel.step_video_masking(
-                encoded_img, **memory_list[objidx].to_dict()
-            )
+                obj_score = float(obj_score.squeeze().cpu().float().numpy())
+                tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
 
-            tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
-            maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
-
-            obj_score = float(obj_score.squeeze().cpu().float().numpy())
-            tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
-
-            # Store memory
-            memory_list[objidx].store_frame_result(frame_idx, mem_enc, obj_ptr)
+                # Store memory
+                memory_list[objidx].store_frame_result(frame_idx, mem_enc, obj_ptr)
 
             # Save mask
             save_mask = uictrl.create_hires_mask_uint8(mask_preds, tracked_mask_idx, frame.shape[:2])
