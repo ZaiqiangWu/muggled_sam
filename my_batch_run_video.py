@@ -888,42 +888,20 @@ with torch.inference_mode():
             if not memory_list[objidx].check_has_prompts():
                 continue
 
-            # ✅ HANDLE FRAME 0
-            if frame_idx == 0:
-                # ✅ Use prompt-based segmentation (same as UI)
-                prompts = memory_list[objidx].prompts_buffer
 
-                if len(prompts) == 0:
-                    continue
 
-                encoded_prompts = sammodel.encode_prompts(*prompts)
-
-                mask_preds, _ = sammodel.generate_masks(
-                    encoded_img,
-                    encoded_prompts,
-                    mask_hint=None,
-                    blank_promptless_output=True,
-                )
-
-                tracked_mask_idx = maskresults_list[objidx].idx
-                obj_score = 1.0  # no score here, safe default
-
-                # ✅ update result
-                maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
-            else:
-
-                obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = sammodel.step_video_masking(
+            obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = sammodel.step_video_masking(
                     encoded_img, **memory_list[objidx].to_dict()
                 )
 
-                tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
-                maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
+            tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
+            maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
 
-                obj_score = float(obj_score.squeeze().cpu().float().numpy())
-                tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
+            obj_score = float(obj_score.squeeze().cpu().float().numpy())
+            tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
 
-                # Store memory
-                memory_list[objidx].store_frame_result(frame_idx, mem_enc, obj_ptr)
+            # Store memory
+            memory_list[objidx].store_frame_result(frame_idx, mem_enc, obj_ptr)
 
             # Save mask
             save_mask = uictrl.create_hires_mask_uint8(mask_preds, tracked_mask_idx, frame.shape[:2])
