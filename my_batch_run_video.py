@@ -860,34 +860,22 @@ finally:
 vreader = ReversibleLoopingVideoReader(video_path).release()
 vreader.pause(False)
 
-initialized = [False for _ in objiter]
 
-# Assume current frame from vreader is already loaded OR just grab first frame
-_, first_frame_idx, first_frame = next(iter(vreader))
-
-encoded_img, _, _ = sammodel.encode_image(first_frame, **imgenc_config_dict)
-
-for objidx in objiter:
-
-    if not memory_list[objidx].check_has_prompts():
-        continue
-
-    prompts = memory_list[objidx].prompts_buffer
-
-    _, init_mem, init_ptr = sammodel.initialize_video_masking(
-        encoded_img,
-        *prompts,
-        mask_index_select=maskresults_list[objidx].idx,
-    )
-
-    memory_list[objidx].store_prompt_result(first_frame_idx, init_mem, init_ptr)
-    initialized[objidx] = True
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
 # Tracking without UI
+found_start = False
 with torch.inference_mode():
     for is_paused, frame_idx, frame in vreader:
         print(frame_idx)
+        # 🔥 Wait until frame 0 appears
+        if not found_start:
+            if frame_idx != 0:
+                continue
+            else:
+                found_start = True
+
+        # now safe: starts from frame 0
 
         if frame_idx >= total_frames:
             break
