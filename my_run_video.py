@@ -548,6 +548,8 @@ try:
         is_trackstate_changed, is_track_on = track_btn.read()
         if is_trackstate_changed:
             vreader.pause(not is_track_on)
+            if is_track_on:
+                end_reached = False  #reset here
             pass
 
         # Wipe out buffered data
