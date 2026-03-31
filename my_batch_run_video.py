@@ -861,6 +861,7 @@ vreader = ReversibleLoopingVideoReader(video_path).release()
 vreader.pause(False)
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
+initialized = [False for _ in objiter]
 # Tracking without UI
 with torch.inference_mode():
     for is_paused, frame_idx, frame in vreader:
@@ -875,6 +876,24 @@ with torch.inference_mode():
 
             if not memory_list[objidx].check_has_prompts():
                 continue
+
+            # ✅ FIRST FRAME → initialize instead of step
+            if not initialized[objidx]:
+                obj_score, mem_enc, obj_ptr = None, None, None
+
+                _, mem_enc, obj_ptr = sammodel.initialize_video_masking(
+                        encoded_img,
+                        *memory_list[objidx].get_prompts(),  # important
+                        mask_index_select=maskresults_list[objidx].idx,
+                    )
+
+                memory_list[objidx].store_prompt_result(frame_idx, mem_enc, obj_ptr)
+
+                initialized[objidx] = True
+
+                continue  # skip saving this iteration (or handle separately)
+
+            # ✅ NORMAL TRACKING
 
             obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = sammodel.step_video_masking(
                 encoded_img, **memory_list[objidx].to_dict()
