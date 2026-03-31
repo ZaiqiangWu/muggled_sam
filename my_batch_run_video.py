@@ -858,12 +858,14 @@ finally:
     vreader.release()
 
 vreader = ReversibleLoopingVideoReader(video_path).release()
+vreader.res
 vreader.pause(False)
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
 # Tracking without UI
 with torch.inference_mode():
     for is_paused, frame_idx, frame in vreader:
+        print(frame_idx)
 
         if frame_idx >= total_frames:
             break
