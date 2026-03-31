@@ -864,18 +864,10 @@ vreader.pause(False)
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
 # Tracking without UI
-found_start = False
 with torch.inference_mode():
     for is_paused, frame_idx, frame in vreader:
         print(frame_idx)
-        # 🔥 Wait until frame 0 appears
-        if not found_start:
-            if frame_idx != 0:
-                continue
-            else:
-                found_start = True
 
-        # now safe: starts from frame 0
 
         if frame_idx >= total_frames:
             break
