@@ -864,6 +864,7 @@ vreader.pause(False)
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
 # Tracking without UI
+prev_real_idx = -1
 with torch.inference_mode():
     for is_paused, frame_idx, frame in vreader:
         print(frame_idx)
@@ -873,8 +874,10 @@ with torch.inference_mode():
         if real_frame_idx < 0:
             continue
 
-        if real_frame_idx >= total_frames:
+        if real_frame_idx < prev_real_idx:
             break
+
+        prev_real_idx = real_frame_idx
 
         # Encode frame
         encoded_img, _, _ = sammodel.encode_image(frame, **imgenc_config_dict)
