@@ -479,7 +479,8 @@ vreader = ReversibleLoopingVideoReader(video_path).release()
 vreader.pause(False)
 
 load_path = "saved_tracking_state.pt"
-
+# Allow this class for unpickling
+torch.serialization.add_safe_globals([SAMVideoObjectResults])
 loaded_data = torch.load(load_path, map_location="cpu")
 
 # Rebuild memory_list
