@@ -66,6 +66,8 @@ parser = argparse.ArgumentParser(description="Script used to run Segment-Anythin
 parser.add_argument("-i", "--image_path", default=default_image_path, help="Path to input image")
 parser.add_argument("-m", "--model_path", default=default_model_path, type=str, help="Path to SAM model weights")
 parser.add_argument("--input_video", type=str, required=True,help="Path to input video")
+parser.add_argument("--prompt_path", type=str,default='./saved_tracking_state.pt',help="Path to input video")
+
 parser.add_argument(
     "-s",
     "--display_size",
@@ -495,7 +497,7 @@ memory_list = [
 vreader = ReversibleLoopingVideoReader(video_path).release()
 vreader.pause(False)
 
-load_path = "saved_tracking_state.pt"
+load_path = args.prompt_path#"saved_tracking_state.pt"
 # ✅ Allowlist both classes
 from collections import deque
 torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer,deque])
