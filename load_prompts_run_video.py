@@ -511,6 +511,7 @@ if not any(mem is not None and mem.check_has_prompts() for mem in memory_list):
     print("No valid prompts found. Exiting.")
     exit(0)
 device = device_config_dict["device"]
+print(device)
 
 move_memory_to_device(memory_list, device)
 
