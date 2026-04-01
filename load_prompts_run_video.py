@@ -498,8 +498,8 @@ load_path = "saved_tracking_state.pt"
 # ✅ Allowlist both classes
 from collections import deque
 torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer,deque])
-
-loaded_data = torch.load("saved_tracking_state.pt", map_location="cuda", weights_only=False)
+device = device_config_dict["device"]
+loaded_data = torch.load("saved_tracking_state.pt", map_location=device, weights_only=False)
 
 # Rebuild memory_list
 memory_list = [None] * num_obj_buffers
@@ -510,7 +510,7 @@ for objidx, mem in loaded_data.items():
 if not any(mem is not None and mem.check_has_prompts() for mem in memory_list):
     print("No valid prompts found. Exiting.")
     exit(0)
-device = device_config_dict["device"]
+
 
 
 move_memory_to_device(memory_list, device)
