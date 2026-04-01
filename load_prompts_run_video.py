@@ -495,9 +495,15 @@ for objidx, mem in loaded_data.items():
 if not any(mem is not None and mem.check_has_prompts() for mem in memory_list):
     print("No valid prompts found. Exiting.")
     exit(0)
-for objidx in objiter:
-    if memory_list[objidx] is not None:
-        memory_list[objidx].to(device_config_dict["device"])
+
+for obj in memory_list:
+    # move memory embeddings to device
+    if hasattr(obj, "memory_embeddings"):
+        obj.memory_embeddings = obj.memory_embeddings.to(device_config_dict["device"])
+
+    # move pointer tensors if any
+    if hasattr(obj, "obj_ptr"):
+        obj.obj_ptr = obj.obj_ptr.to(device_config_dict["device"])
 
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
