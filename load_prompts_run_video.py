@@ -38,7 +38,8 @@ from muggled_sam.demo_helpers.misc import PeriodicVRAMReport, make_device_config
 from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
 from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing
 from muggled_sam.demo_helpers.contours import get_contours_from_mask
-from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults
+from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults,SAMVideoBuffer
+
 from muggled_sam.demo_helpers.saving import save_video_frames, get_save_name
 from muggled_sam.demo_helpers.ffmpeg import get_default_ffmpeg_command, verify_ffmpeg_path, save_video_stream
 
@@ -479,8 +480,8 @@ vreader = ReversibleLoopingVideoReader(video_path).release()
 vreader.pause(False)
 
 load_path = "saved_tracking_state.pt"
-# Allow this class for unpickling
-torch.serialization.add_safe_globals([SAMVideoObjectResults])
+# ✅ Allowlist both classes
+torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer])
 
 loaded_data = torch.load("saved_tracking_state.pt", map_location="cpu")
 
