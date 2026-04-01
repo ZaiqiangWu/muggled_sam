@@ -65,7 +65,7 @@ default_ffmpeg = get_default_ffmpeg_command()
 parser = argparse.ArgumentParser(description="Script used to run Segment-Anything-V2 (SAMv2) on a video")
 parser.add_argument("-i", "--image_path", default=default_image_path, help="Path to input image")
 parser.add_argument("-m", "--model_path", default=default_model_path, type=str, help="Path to SAM model weights")
-parser.add_argument("--input_video", type=str, help="Path to input video")
+parser.add_argument("--input_video", type=str, required=True,help="Path to input video")
 parser.add_argument(
     "-s",
     "--display_size",
