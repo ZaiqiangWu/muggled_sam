@@ -481,7 +481,8 @@ vreader.pause(False)
 
 load_path = "saved_tracking_state.pt"
 # ✅ Allowlist both classes
-torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer])
+from collections import deque
+torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer,deque])
 
 loaded_data = torch.load("saved_tracking_state.pt", map_location="cpu")
 
