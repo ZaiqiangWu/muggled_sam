@@ -863,8 +863,6 @@ vreader = ReversibleLoopingVideoReader(video_path).release()
 vreader.pause(False)
 
 
-from tqdm import tqdm
-pbar = tqdm(total=total_frames)
 # Check if ANY object has prompts
 has_any_prompts = any(
     memory_list[objidx].check_has_prompts() for objidx in objiter
@@ -872,7 +870,6 @@ has_any_prompts = any(
 
 if not has_any_prompts:
     print("No prompts found. Exiting...")
-    pbar.close()
     exit(0)  # or return if inside a function
 # save prompts
 save_path = "saved_tracking_state.pt"
@@ -888,15 +885,4 @@ torch.save(save_data, save_path)
 
 print(f"Saved tracking state to {save_path}")
 
-# ---------------------------------------------------------------------------------------------------------------------
-# %% Final clean up
 
-# Save any buffered frame data
-for objidx, savebuffer in enumerate(savebuffers_list):
-    png_per_frame_dict = savebuffer.png_per_frame_dict
-    num_frames = len(png_per_frame_dict.keys())
-    if num_frames > 0:
-        use_ffmpeg = save_segmentation_results(
-            video_path, video_fps, objidx, png_per_frame_dict, ffmpeg_path, use_ffmpeg
-        )
-    pass
