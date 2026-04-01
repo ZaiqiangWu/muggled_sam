@@ -540,6 +540,8 @@ with torch.inference_mode():
 
         for objidx in objiter:
 
+            if not memory_list[objidx]:
+                continue
             if not memory_list[objidx].check_has_prompts():
                 continue
 
