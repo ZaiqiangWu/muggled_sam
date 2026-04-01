@@ -481,7 +481,8 @@ vreader.pause(False)
 load_path = "saved_tracking_state.pt"
 # Allow this class for unpickling
 torch.serialization.add_safe_globals([SAMVideoObjectResults])
-loaded_data = torch.load(load_path, map_location="cpu")
+
+loaded_data = torch.load("saved_tracking_state.pt", map_location="cpu")
 
 # Rebuild memory_list
 memory_list = [None] * num_obj_buffers
