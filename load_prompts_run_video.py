@@ -484,7 +484,7 @@ load_path = "saved_tracking_state.pt"
 from collections import deque
 torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer,deque])
 
-loaded_data = torch.load("saved_tracking_state.pt", map_location="cpu")
+loaded_data = torch.load("saved_tracking_state.pt", map_location="cpu", weights_only=False)
 
 # Rebuild memory_list
 memory_list = [None] * num_obj_buffers
