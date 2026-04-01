@@ -501,11 +501,8 @@ torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer,dequ
 
 loaded_data = torch.load("saved_tracking_state.pt", map_location="cpu", weights_only=False)
 
-memory_list = loaded_data["memory_list"]
-
-# Move all tensors inside memory_list to GPU
-device = device_config_dict["device"]
-move_memory_to_device(memory_list, device)
+# Rebuild memory_list
+memory_list = [None] * num_obj_buffers
 
 for objidx, mem in loaded_data.items():
     memory_list[objidx] = mem
@@ -513,8 +510,9 @@ for objidx, mem in loaded_data.items():
 if not any(mem is not None and mem.check_has_prompts() for mem in memory_list):
     print("No valid prompts found. Exiting.")
     exit(0)
+device = device_config_dict["device"]
 
-
+move_memory_to_device(memory_list, device)
 
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
