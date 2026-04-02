@@ -47,7 +47,8 @@ def main():
     for img_list in img_lists:
         #print(img_list[0])
         print(len(img_list))
-    target_dir = os.path.join(root_dir, 'merged')
+    folder_name = os.path.basename(os.getcwd())
+    target_dir = os.path.join(root_dir, folder_name)
     os.makedirs(target_dir, exist_ok=True)
 
     for i in tqdm(range(len(img_lists[0]))):
