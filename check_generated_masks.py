@@ -41,6 +41,8 @@ def main():
     tar_dirs = get_subfolders(saved_dir)
     #print(tar_dirs)
     for tar_dir in tar_dirs:
+        print('-------------------------------')
+        print("Processing tar folder: {}".format(tar_dir))
         mask_name = os.path.basename(os.path.normpath(tar_dir))
         if os.path.isdir(os.path.join(tar_dir,mask_name)):
             print("mask already generated")
