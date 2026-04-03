@@ -60,7 +60,7 @@ def generate_mask_video(tar_dir):
     mask_name = os.path.basename(os.path.normpath(tar_dir))
     assert os.path.isdir(os.path.join(tar_dir,mask_name))
     img_list = get_file_path_list(os.path.join(tar_dir,mask_name),'png')
-    video_writer=MultithreadVideoWriter(os.path.join(tar_dir, mask_name+'.mp4'))
+    video_writer=MultithreadVideoWriter(os.path.join(tar_dir, mask_name+'_mask.mp4'))
     for i in tqdm(range(len(img_list))):
         #if i>=len(video_loader0)*0.66:
         #    break
