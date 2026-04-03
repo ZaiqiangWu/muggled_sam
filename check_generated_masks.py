@@ -53,17 +53,17 @@ def main():
         else:
             print("generating mask")
             process_tar_dir(tar_dir, generate_dir)
-        if os.path.exists(os.path.join(tar_dir,mask_name+'_mask.mp4')):
+        if os.path.exists(os.path.join(generate_dir,mask_name,mask_name+'_mask.mp4')):
             print("mask video already generated")
         else:
             print("generating mask video")
-            generate_mask_video(tar_dir)
+            generate_mask_video(os.path.join(generate_dir,mask_name))
 
 def generate_mask_video(target_dir):
     mask_name = os.path.basename(os.path.normpath(target_dir))
     assert os.path.isdir(os.path.join(target_dir,mask_name))
-    img_list = get_file_path_list(os.path.join(target_dir,mask_name,mask_name),'png')
-    video_writer=MultithreadVideoWriter(os.path.join(target_dir,mask_name, mask_name+'_mask.mp4'))
+    img_list = get_file_path_list(os.path.join(target_dir,mask_name),'png')
+    video_writer=MultithreadVideoWriter(os.path.join(target_dir, mask_name+'_mask.mp4'))
     for i in tqdm(range(len(img_list))):
         #if i>=len(video_loader0)*0.66:
         #    break
