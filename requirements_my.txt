@@ -3,3 +3,5 @@ numpy           >=1.21, <2.5
 torch           >=2.7, <2.11
 torchvision
 tqdm
+imageio~=2.31.3
+imageio-ffmpeg
