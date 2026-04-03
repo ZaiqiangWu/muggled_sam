@@ -39,7 +39,7 @@ def extract_all_tar(root_dir="."):
 def main():
     saved_dir = './saved_images/run_video/'
     tar_dirs = get_subfolders(saved_dir)
-    #print(tar_dirs)
+    print(tar_dirs)
     for tar_dir in tar_dirs:
         print('-------------------------------')
         print("Processing tar folder: {}".format(tar_dir))
@@ -79,7 +79,7 @@ def process_tar_dir(dir_path):
     root_dir = dir_path
     mask_name = os.path.basename(os.path.normpath(dir_path))
     img_dirs = get_subfolders(root_dir)
-    print(img_dirs)
+    #print(img_dirs)
     if len(img_dirs) == 1:
         print("Nothing to do, just rename")
         os.rename(img_dirs[0],os.path.join(root_dir,mask_name))
