@@ -9,14 +9,15 @@ import numpy as np
 import tarfile
 from util.multithread_video_writer import MultithreadVideoWriter
 
-def extract_all_tar(root_dir="."):
+def extract_all_tar(root_dir, gen_dir):
+    folder_name = os.path.basename(os.path.normpath(root_dir))
     for file in os.listdir(root_dir):
         if file.endswith(".tar"):
             tar_path = os.path.join(root_dir, file)
 
             # 生成同名文件夹
-            folder_name = os.path.basename(os.path.normpath(root_dir))
-            extract_path = os.path.join(root_dir, folder_name)
+            tar_name = os.path.basename(tar_path).split(".")[0]
+            extract_path = os.path.join(gen_dir, folder_name, tar_name)
 
             print(f"Processing: {file}")
 
@@ -38,6 +39,8 @@ def extract_all_tar(root_dir="."):
 
 def main():
     saved_dir = './saved_images/run_video/'
+    generate_dir = './generated_masks/'
+    os.makedirs(generate_dir, exist_ok=True)
     tar_dirs = get_subfolders(saved_dir)
     tar_dirs.sort()
     print(tar_dirs)
@@ -45,22 +48,22 @@ def main():
         print('-------------------------------')
         print("Processing tar folder: {}".format(tar_dir))
         mask_name = os.path.basename(os.path.normpath(tar_dir))
-        if os.path.isdir(os.path.join(tar_dir,mask_name)):
+        if os.path.isdir(os.path.join(generate_dir,mask_name,mask_name)):
             print("mask already generated")
         else:
             print("generating mask")
-            process_tar_dir(tar_dir)
+            process_tar_dir(tar_dir, generate_dir)
         if os.path.exists(os.path.join(tar_dir,mask_name+'_mask.mp4')):
             print("mask video already generated")
         else:
             print("generating mask video")
             generate_mask_video(tar_dir)
 
-def generate_mask_video(tar_dir):
-    mask_name = os.path.basename(os.path.normpath(tar_dir))
-    assert os.path.isdir(os.path.join(tar_dir,mask_name))
-    img_list = get_file_path_list(os.path.join(tar_dir,mask_name),'png')
-    video_writer=MultithreadVideoWriter(os.path.join(tar_dir, mask_name+'_mask.mp4'))
+def generate_mask_video(target_dir):
+    mask_name = os.path.basename(os.path.normpath(target_dir))
+    assert os.path.isdir(os.path.join(target_dir,mask_name))
+    img_list = get_file_path_list(os.path.join(target_dir,mask_name,mask_name),'png')
+    video_writer=MultithreadVideoWriter(os.path.join(target_dir,mask_name, mask_name+'_mask.mp4'))
     for i in tqdm(range(len(img_list))):
         #if i>=len(video_loader0)*0.66:
         #    break
@@ -77,22 +80,22 @@ def generate_mask_video(tar_dir):
 
 
 
-def process_tar_dir(dir_path):
-    extract_all_tar(dir_path)
+def process_tar_dir(dir_path,gen_path):
+    extract_all_tar(dir_path,gen_path)
     root_dir = dir_path
     mask_name = os.path.basename(os.path.normpath(dir_path))
-    img_dirs = get_subfolders(root_dir)
+    img_dirs = get_subfolders(os.path.join(gen_path,mask_name))
     #print(img_dirs)
     if len(img_dirs) == 1:
         print("Nothing to do, just rename")
-        os.rename(img_dirs[0],os.path.join(root_dir,mask_name))
+        os.rename(img_dirs[0],os.path.join(gen_path,mask_name, mask_name))
         return
     img_lists = [get_file_path_list(img_dir,'png') for img_dir in img_dirs]
     for img_list in img_lists:
         #print(img_list[0])
         print(len(img_list))
-    folder_name = os.path.basename(os.getcwd())
-    target_dir = os.path.join(root_dir, folder_name)
+    folder_name = mask_name
+    target_dir = os.path.join(gen_path, folder_name,folder_name)
     os.makedirs(target_dir, exist_ok=True)
 
     for i in tqdm(range(len(img_lists[0]))):
