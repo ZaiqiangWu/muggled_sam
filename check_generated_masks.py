@@ -15,7 +15,7 @@ def extract_all_tar(root_dir="."):
             tar_path = os.path.join(root_dir, file)
 
             # 生成同名文件夹
-            folder_name = os.path.splitext(file)[0]
+            folder_name = os.path.basename(os.path.normpath(root_dir))
             extract_path = os.path.join(root_dir, folder_name)
 
             print(f"Processing: {file}")
