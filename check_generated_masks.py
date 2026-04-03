@@ -51,7 +51,7 @@ def main():
         if os.path.exists(os.path.join(tar_dir,mask_name+'.mp4')):
             print("mask video already generated")
         else:
-            pass
+            generate_mask_video(tar_dir)
 
 def generate_mask_video(tar_dir):
     mask_name = os.path.basename(os.path.normpath(tar_dir))
