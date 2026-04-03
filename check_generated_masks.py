@@ -39,6 +39,7 @@ def extract_all_tar(root_dir="."):
 def main():
     saved_dir = './saved_images/run_video/'
     tar_dirs = get_subfolders(saved_dir)
+    tar_dirs.sort()
     print(tar_dirs)
     for tar_dir in tar_dirs:
         print('-------------------------------')
