@@ -2,7 +2,7 @@
 #SBATCH -p 032-partition
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH -o ca0_hr_rnn_dp2ta.out
+#SBATCH -o output.out
 
 # 加载 conda
 source ~/anaconda3/etc/profile.d/conda.sh
