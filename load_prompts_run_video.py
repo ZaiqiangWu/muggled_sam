@@ -519,8 +519,7 @@ if not any(mem is not None and mem.check_has_prompts() for mem in memory_list):
 move_memory_to_device(memory_list, device)
 
 from tqdm import tqdm
-import sys
-pbar = tqdm(total=total_frames,file=sys.stdout)
+pbar = tqdm(total=total_frames)
 # Check if ANY object has prompts
 
 # Tracking without UI
