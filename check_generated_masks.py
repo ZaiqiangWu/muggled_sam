@@ -27,7 +27,7 @@ def extract_all_tar(root_dir, gen_dir):
             # 解压
             try:
                 with tarfile.open(tar_path, "r") as tar:
-                    tar.extractall(path=extract_path)
+                    tar.extractall(path=extract_path, filter="data")
                 print(f"Extracted to: {extract_path}")
 
                 # 删除 tar 文件
