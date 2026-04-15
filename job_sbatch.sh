@@ -12,12 +12,13 @@ echo "Running on $(hostname)"
 echo "Python: $(which python)"
 
 nvidia-smi
-python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_00.mp4
+#python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_00.mp4
+#python check_generated_masks.py
+python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_01.mp4
+python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_02.mp4
+python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_03.mp4
+python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_04.mp4
 python check_generated_masks.py
-#python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_01.mp4
-#python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_02.mp4
-#python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_03.mp4
-#python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_04.mp4
 
 
 
