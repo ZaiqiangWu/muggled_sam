@@ -18,9 +18,12 @@ nvidia-smi
 #python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_02.mp4
 #python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_03.mp4
 #python -u load_prompts_run_video.py --prompt_path ./pl0.pt --input_video ./videos/pl0/pl0_04.mp4
-python -u load_prompts_run_video.py --prompt_path ./ps.pt --input_video ./videos/ps/ps_00.mp4
-python -u load_prompts_run_video.py --prompt_path ./ps.pt --input_video ./videos/ps/ps_01.mp4
-python -u load_prompts_run_video.py --prompt_path ./ps.pt --input_video ./videos/ps/ps_02.mp4
+#python -u load_prompts_run_video.py --prompt_path ./ps.pt --input_video ./videos/ps/ps_00.mp4
+#python -u load_prompts_run_video.py --prompt_path ./ps.pt --input_video ./videos/ps/ps_01.mp4
+#python -u load_prompts_run_video.py --prompt_path ./ps.pt --input_video ./videos/ps/ps_02.mp4
+python -u load_prompts_run_video.py --prompt_path ./ps1.pt --input_video ./videos/ps1/ps1_00.mp4
+python -u load_prompts_run_video.py --prompt_path ./ps1.pt --input_video ./videos/ps1/ps1_01.mp4
+
 
 
 python check_generated_masks.py
