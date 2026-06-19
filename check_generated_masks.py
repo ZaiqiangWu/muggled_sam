@@ -55,11 +55,11 @@ def main():
         else:
             print("generating mask")
             process_tar_dir(tar_dir, generate_dir)
-        if os.path.exists(os.path.join(generate_dir,mask_name,mask_name+'_mask.mp4')):
+        if os.path.exists(os.path.join(generate_dir,mask_name+'_mask.mp4')):
             print("mask video already generated")
         else:
             print("generating mask video")
-            generate_mask_video(generate_dir)
+            generate_mask_video(os.path.join(generate_dir,mask_name))
 
 def generate_mask_video(target_dir):
     print(target_dir)
