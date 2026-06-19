@@ -49,7 +49,7 @@ def main():
         print('-------------------------------')
         print("Processing tar folder: {}".format(tar_dir))
         mask_name = os.path.basename(os.path.normpath(tar_dir))
-        garment_name = mask_name.split('_')[:-1]
+        garment_name = '_'.join(mask_name.split('_')[:-1])
         if os.path.isdir(os.path.join(video_dir,garment_name,mask_name)):
             print("mask already generated")
         else:
@@ -63,7 +63,7 @@ def main():
 
 def generate_mask_video(target_dir):
     mask_name = os.path.basename(os.path.normpath(target_dir))
-    garment_name = mask_name.split('_')[:-1]
+    garment_name = '_'.join(mask_name.split('_')[:-1])
     video_dir = './videos/'
     img_list = get_file_path_list(os.path.join(video_dir,garment_name,mask_name),'png')
     video_writer=MultithreadVideoWriter(os.path.join(target_dir, mask_name+'_mask.mp4'))
@@ -88,7 +88,7 @@ def process_tar_dir(dir_path,gen_path):
     root_dir = dir_path
     video_dir = './videos/'
     mask_name = os.path.basename(os.path.normpath(dir_path))
-    garment_name = mask_name.split('_')[:-1]
+    garment_name = '_'.join(mask_name.split('_')[:-1])
     img_dirs = get_subfolders(os.path.join(gen_path,mask_name))
     #print(img_dirs)
     if len(img_dirs) == 1:
