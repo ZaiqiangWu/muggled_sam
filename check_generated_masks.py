@@ -39,7 +39,8 @@ def extract_all_tar(root_dir, gen_dir):
 
 def main():
     saved_dir = './saved_images/run_video/'
-    generate_dir = './generated_masks/'
+    generate_dir = './generated_mask_videos/'
+    video_dir = './videos/'
     os.makedirs(generate_dir, exist_ok=True)
     tar_dirs = get_subfolders(saved_dir)
     tar_dirs.sort()
@@ -48,7 +49,8 @@ def main():
         print('-------------------------------')
         print("Processing tar folder: {}".format(tar_dir))
         mask_name = os.path.basename(os.path.normpath(tar_dir))
-        if os.path.isdir(os.path.join(generate_dir,mask_name,mask_name)):
+        garment_name = mask_name.split('_')[:-1]
+        if os.path.isdir(os.path.join(video_dir,garment_name,mask_name)):
             print("mask already generated")
         else:
             print("generating mask")
@@ -57,12 +59,13 @@ def main():
             print("mask video already generated")
         else:
             print("generating mask video")
-            generate_mask_video(os.path.join(generate_dir,mask_name))
+            generate_mask_video(generate_dir)
 
 def generate_mask_video(target_dir):
     mask_name = os.path.basename(os.path.normpath(target_dir))
-    assert os.path.isdir(os.path.join(target_dir,mask_name))
-    img_list = get_file_path_list(os.path.join(target_dir,mask_name),'png')
+    garment_name = mask_name.split('_')[:-1]
+    video_dir = './videos/'
+    img_list = get_file_path_list(os.path.join(video_dir,garment_name,mask_name),'png')
     video_writer=MultithreadVideoWriter(os.path.join(target_dir, mask_name+'_mask.mp4'))
     for i in tqdm(range(len(img_list))):
         #if i>=len(video_loader0)*0.66:
@@ -83,7 +86,9 @@ def generate_mask_video(target_dir):
 def process_tar_dir(dir_path,gen_path):
     extract_all_tar(dir_path,gen_path)
     root_dir = dir_path
+    video_dir = './videos/'
     mask_name = os.path.basename(os.path.normpath(dir_path))
+    garment_name = mask_name.split('_')[:-1]
     img_dirs = get_subfolders(os.path.join(gen_path,mask_name))
     #print(img_dirs)
     if len(img_dirs) == 1:
@@ -95,7 +100,7 @@ def process_tar_dir(dir_path,gen_path):
         #print(img_list[0])
         print(len(img_list))
     folder_name = mask_name
-    target_dir = os.path.join(gen_path, folder_name,folder_name)
+    target_dir = os.path.join(video_dir, garment_name,folder_name)
     os.makedirs(target_dir, exist_ok=True)
 
     for i in tqdm(range(len(img_lists[0]))):
