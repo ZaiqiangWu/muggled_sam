@@ -58,7 +58,7 @@ def main():
         if os.path.exists(os.path.join(generate_dir,mask_name+'_mask.mp4')):
             print("mask video already generated")
         else:
-            print("generating mask video")
+            print("generating mask video:",os.path.join(generate_dir,mask_name+'_mask.mp4'))
             generate_mask_video(os.path.join(generate_dir,mask_name))
 
 def generate_mask_video(target_dir):
