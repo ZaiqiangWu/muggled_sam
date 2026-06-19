@@ -62,6 +62,7 @@ def main():
             generate_mask_video(generate_dir)
 
 def generate_mask_video(target_dir):
+    print(target_dir)
     mask_name = os.path.basename(os.path.normpath(target_dir))
     garment_name = '_'.join(mask_name.split('_')[:-1])
     video_dir = './videos/'
