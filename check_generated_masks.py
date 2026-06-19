@@ -94,7 +94,7 @@ def process_tar_dir(dir_path,gen_path):
     #print(img_dirs)
     if len(img_dirs) == 1:
         print("Nothing to do, just rename")
-        os.rename(img_dirs[0],os.path.join(gen_path,mask_name, mask_name))
+        os.rename(img_dirs[0],os.path.join(video_dir, garment_name,mask_name))
         return
     img_lists = [get_file_path_list(img_dir,'png') for img_dir in img_dirs]
     for img_list in img_lists:
@@ -104,7 +104,7 @@ def process_tar_dir(dir_path,gen_path):
     target_dir = os.path.join(video_dir, garment_name,folder_name)
     os.makedirs(target_dir, exist_ok=True)
 
-    for i in tqdm(range(len(img_lists[0]))):
+    for i in tqdm(range(len(img_lists[0])),"Merge masks"):
         #if i>=len(video_loader0)*0.66:
         #    break
         datas=[cv2.imread(img_list[i],cv2.IMREAD_UNCHANGED) for img_list in img_lists]
