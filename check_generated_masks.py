@@ -68,7 +68,7 @@ def generate_mask_video(target_dir):
     video_dir = './videos/'
     img_list = get_file_path_list(os.path.join(video_dir,garment_name,mask_name),'png')
     video_writer=MultithreadVideoWriter(os.path.join(target_dir, mask_name+'_mask.mp4'))
-    for i in tqdm(range(len(img_list))):
+    for i in tqdm(range(len(img_list)),"Generating mask video"):
         #if i>=len(video_loader0)*0.66:
         #    break
         data=cv2.imread(img_list[i],cv2.IMREAD_UNCHANGED)
