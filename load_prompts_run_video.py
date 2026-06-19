@@ -65,7 +65,7 @@ default_ffmpeg = get_default_ffmpeg_command()
 parser = argparse.ArgumentParser(description="Script used to run Segment-Anything-V2 (SAMv2) on a video")
 parser.add_argument("-i", "--image_path", default=default_image_path, help="Path to input image")
 parser.add_argument("-m", "--model_path", default=default_model_path, type=str, help="Path to SAM model weights")
-parser.add_argument("--input_video", type=str, required=True,help="Path to input video")
+parser.add_argument("--input_video", required=True, type=str,help="Path to input video")
 parser.add_argument("--prompt_path", type=str,default='./saved_tracking_state.pt',help="Path to input video")
 
 parser.add_argument(
@@ -217,10 +217,8 @@ video_path = args.input_video#ask_for_path_if_missing(arg_image_path, "video", h
 model_path = './model_weights/sam3.pt'#ask_for_model_path_if_missing(__file__, arg_model_path, history_modelpath)
 
 # Store history for use on reload (but don't save video path when using webcam)
-if use_webcam:
-    history.store(model_path=model_path)
-else:
-    history.store(video_path=video_path, model_path=model_path)
+
+history.store(video_path=video_path, model_path=model_path)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

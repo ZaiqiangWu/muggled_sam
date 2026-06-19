@@ -27,13 +27,14 @@
 #python load_prompts_run_video.py --prompt_path ./pajama.pt --input_video ./videos/pajama/pajama_00.mp4
 #python load_prompts_run_video.py --prompt_path ./pajama.pt --input_video ./videos/pajama/pajama_01.mp4
 #python load_prompts_run_video.py --prompt_path ./gown.pt --input_video ./videos/gown/gown_00.mp4
-python load_prompts_run_video.py --prompt_path ./pinkdress.pt --input_video ./videos/pinkdress/pinkdress_00.mp4
-python load_prompts_run_video.py --prompt_path ./pinkdress.pt --input_video ./videos/pinkdress/pinkdress_01.mp4
-python load_prompts_run_video.py --prompt_path ./polo.pt --input_video ./videos/polo/polo_00.mp4
-python load_prompts_run_video.py --prompt_path ./polo.pt --input_video ./videos/polo/polo_01.mp4
-python load_prompts_run_video.py --prompt_path ./spacesuit.pt --input_video ./videos/spacesuit/spacesuit_00.mp4
-python load_prompts_run_video.py --prompt_path ./spacesuit.pt --input_video ./videos/spacesuit/spacesuit_01.mp4
+#python load_prompts_run_video.py --prompt_path ./pinkdress.pt --input_video ./videos/pinkdress/pinkdress_00.mp4
+#python load_prompts_run_video.py --prompt_path ./pinkdress.pt --input_video ./videos/pinkdress/pinkdress_01.mp4
+#python load_prompts_run_video.py --prompt_path ./polo.pt --input_video ./videos/polo/polo_00.mp4
+#python load_prompts_run_video.py --prompt_path ./polo.pt --input_video ./videos/polo/polo_01.mp4
+#python load_prompts_run_video.py --prompt_path ./spacesuit.pt --input_video ./videos/spacesuit/spacesuit_00.mp4
+#python load_prompts_run_video.py --prompt_path ./spacesuit.pt --input_video ./videos/spacesuit/spacesuit_01.mp4
+python load_prompts_run_dir.py --prompt_path ./tracking_states/quilted_jacket.pt --input_dir ./videos/quilted_jacket/
 
 
-python check_generated_masks.py
+#python check_generated_masks.py
 
