@@ -59,11 +59,10 @@ def main():
             print("mask video already generated")
         else:
             print("generating mask video:",os.path.join(generate_dir,mask_name+'_mask.mp4'))
-            generate_mask_video(os.path.join(generate_dir,mask_name))
+            generate_mask_video(generate_dir,mask_name)
 
-def generate_mask_video(target_dir):
+def generate_mask_video(target_dir,mask_name):
     #print(target_dir)
-    mask_name = os.path.basename(os.path.normpath(target_dir))
     garment_name = '_'.join(mask_name.split('_')[:-1])
     video_dir = './videos/'
     img_list = get_file_path_list(os.path.join(video_dir,garment_name,mask_name),'png')
