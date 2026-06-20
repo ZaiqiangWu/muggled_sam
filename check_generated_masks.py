@@ -61,20 +61,30 @@ def main():
             print("generating mask video:",os.path.join(generate_dir,mask_name+'_mask.mp4'))
             generate_mask_video(generate_dir,mask_name)
 
+from concurrent.futures import ThreadPoolExecutor
+
+def load_frame(path):
+    data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    frame = data[:, :, :3]
+    mask = data[:, :, 3]
+    frame[mask == 0] = 255
+    return frame
+
 def generate_mask_video(target_dir,mask_name):
     #print(target_dir)
     garment_name = '_'.join(mask_name.split('_')[:-1])
     video_dir = './videos/'
     img_list = get_file_path_list(os.path.join(video_dir,garment_name,mask_name),'png')
     video_writer=MultithreadVideoWriter(os.path.join(target_dir, mask_name+'_mask.mp4'))
-    for i in tqdm(range(len(img_list)),"Generating mask video"):
-        #if i>=len(video_loader0)*0.66:
-        #    break
-        data=cv2.imread(img_list[i],cv2.IMREAD_UNCHANGED)
-        frame = data[:,:,:3]
-        mask = data[:,:,3]
-        frame[mask==0] = np.array([255,255,255],np.uint8)
-        video_writer.append(frame,False)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+
+        for frame in tqdm(
+                pool.map(load_frame, img_list),
+                total=len(img_list),
+                desc="Generating mask video"
+        ):
+            video_writer.append(frame, False)
+
     video_writer.make_video()
     video_writer.close()
 
