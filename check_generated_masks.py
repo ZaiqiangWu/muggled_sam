@@ -8,6 +8,8 @@ import numpy as np
 
 import tarfile
 from util.multithread_video_writer import MultithreadVideoWriter
+from concurrent.futures import ThreadPoolExecutor
+
 
 def extract_all_tar(root_dir, gen_dir):
     folder_name = os.path.basename(os.path.normpath(root_dir))
@@ -61,7 +63,6 @@ def main():
             print("generating mask video:",os.path.join(generate_dir,mask_name+'_mask.mp4'))
             generate_mask_video(generate_dir,mask_name)
 
-from concurrent.futures import ThreadPoolExecutor
 
 def load_frame(path):
     data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -77,7 +78,6 @@ def generate_mask_video(target_dir,mask_name):
     img_list = get_file_path_list(os.path.join(video_dir,garment_name,mask_name),'png')
     video_writer=MultithreadVideoWriter(os.path.join(target_dir, mask_name+'_mask.mp4'))
     with ThreadPoolExecutor(max_workers=8) as pool:
-
         for frame in tqdm(
                 pool.map(load_frame, img_list),
                 total=len(img_list),
@@ -112,14 +112,35 @@ def process_tar_dir(dir_path,gen_path):
     folder_name = mask_name
     target_dir = os.path.join(video_dir, garment_name,folder_name)
     os.makedirs(target_dir, exist_ok=True)
-
+    '''
     for i in tqdm(range(len(img_lists[0])),"Merge masks"):
-        #if i>=len(video_loader0)*0.66:
-        #    break
         datas=[cv2.imread(img_list[i],cv2.IMREAD_UNCHANGED) for img_list in img_lists]
         frame = mask_overlay(datas)
         frame_path = os.path.join(target_dir,str(i).zfill(8)+'.png')
         cv2.imwrite(frame_path,frame)
+    '''
+    def process_frame(i):
+        datas = [
+            cv2.imread(img_list[i], cv2.IMREAD_UNCHANGED)
+            for img_list in img_lists
+        ]
+        frame = mask_overlay(datas)
+        frame_path = os.path.join(
+            target_dir,
+            f"{i:08d}.png")
+        cv2.imwrite(frame_path, frame)
+        return i
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(
+            tqdm(
+                pool.map(process_frame, range(len(img_lists[0]))),
+                total=len(img_lists[0]),
+                desc="Merge masks"
+            )
+        )
+
+
 
 
 
