@@ -39,6 +39,7 @@ from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
 from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing
 from muggled_sam.demo_helpers.contours import get_contours_from_mask
 from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults
+from muggled_sam.demo_helpers.video_prompt_state import make_tracking_state
 from muggled_sam.demo_helpers.saving import save_video_frames, get_save_name
 from muggled_sam.demo_helpers.ffmpeg import get_default_ffmpeg_command, verify_ffmpeg_path, save_video_stream
 
@@ -65,6 +66,18 @@ parser = argparse.ArgumentParser(description="Script used to run Segment-Anythin
 parser.add_argument("-i", "--image_path", default=default_image_path, help="Path to input image")
 parser.add_argument("-m", "--model_path", default=default_model_path, type=str, help="Path to SAM model weights")
 parser.add_argument("--input_video", type=str, required=True,help="Path to input video")
+parser.add_argument(
+    "--text_prompt",
+    default=None,
+    type=str,
+    help="SAM3 text prompt used to seed video tracking on the first frame",
+)
+parser.add_argument(
+    "--text_score_threshold",
+    default=0.5,
+    type=float,
+    help="Minimum SAM3 text-detection score used to create a tracked object (default: 0.5)",
+)
 
 parser.add_argument(
     "-s",
@@ -201,6 +214,8 @@ use_webcam = args.use_webcam
 enable_crop_ui = args.crop
 bg_color_hex = args.bg_color_hex
 arg_ffmpeg = args.ffmpeg
+text_prompt = args.text_prompt.strip() if args.text_prompt is not None else None
+text_score_threshold = args.text_score_threshold
 
 # Set up device config
 device_config_dict = make_device_config(device_str, use_float32)
@@ -242,6 +257,8 @@ model_name = osp.basename(model_path)
 print("", "Loading model weights...", f"  @ {model_path}", sep="\n", flush=True)
 model_config_dict, sammodel = make_sam_from_state_dict(model_path)
 assert sammodel.name in ("samv2", "samv3"), "Only SAMv2/v3 models are supported for video predictions!"
+if text_prompt and sammodel.name != "samv3":
+    raise ValueError("--text_prompt requires SAM3 model weights")
 sammodel.to(**device_config_dict)
 
 # Set up access to video
@@ -506,6 +523,34 @@ savebuffers_list = [SaveBufferData.create() for _ in objiter]
 memory_list = [
     SAMVideoObjectResults.create(max_memory_history, max_pointer_history, prompt_history_length=32) for _ in objiter
 ]
+
+# A SAM3 text prompt uses the detection model on the first frame, then seeds the
+# normal video tracker with one memory per highest-scoring detected object.
+if text_prompt:
+    print("", f"Finding text prompt on first frame: {text_prompt!r}", sep="\n", flush=True)
+    detector_model = sammodel.make_detector_model()
+    detection_img, _, _ = detector_model.encode_detection_image(sample_frame, **imgenc_config_dict)
+    encoded_exemplars = detector_model.encode_exemplars(detection_img, text=text_prompt)
+    detection_results = detector_model.generate_detections(detection_img, encoded_exemplars)
+    detected_masks, _, detected_scores, _ = detector_model.filter_results(
+        *detection_results, score_threshold=text_score_threshold
+    )
+
+    if detected_masks is None or detected_masks.shape[0] == 0:
+        print(
+            f"No objects matched {text_prompt!r} at score >= {text_score_threshold}. "
+            "Add point/box prompts in the UI or lower --text_score_threshold.",
+            flush=True,
+        )
+    else:
+        # Detection queries are not score-sorted.  Track the strongest results
+        # first so their assignment to the finite object-buffer slots is stable.
+        detected_scores = detected_scores.flatten()
+        _, best_indices = torch.topk(detected_scores, k=min(num_obj_buffers, detected_scores.numel()))
+        for objidx, detection_idx in enumerate(best_indices.tolist()):
+            prompt_memory = sammodel.initialize_from_mask(encoded_img, detected_masks[detection_idx])
+            memory_list[objidx].store_prompt_result(0, prompt_memory)
+        print(f"Seeded {len(best_indices)} tracked object(s) from the text prompt.", flush=True)
 
 vreader.pause()
 curr_state = STATES.PAUSED
@@ -881,8 +926,7 @@ for objidx in objiter:
     if memory_list[objidx].check_has_prompts():
         save_data[objidx] = memory_list[objidx]
 
-torch.save(save_data, save_path)
+torch.save(make_tracking_state(save_data, text_prompt), save_path)
 
 print(f"Saved tracking state to {save_path}")
-
 

@@ -23,6 +23,7 @@ pip install -r requirements_my.txt
 ```
 python save_prompts_run_video.py --input_video input_video.mp4
 ```
+A window will pop up and then youcan set the points and bbox prompts interactively.
 You can use Shift + click to place multiple points.
 
 After finish setting the prompts, press `q` or `g` to close the user interface, the prompts will be saved as `./saved_tracking_state.pt`.
@@ -43,3 +44,16 @@ You can execute this command to generate segmentation results for visually check
 ```
 python check_generated_masks.py
 ```
+
+# TODO task
+
+Enable text prompt like this, and the text prompt can be saved and loaded in above commands.
+```
+python save_prompts_run_video.py --input_video input_video.mp4 --text_prompt 'garments and hat'
+```
+
+`--text_prompt` requires SAM3 weights. It finds matching objects in the first
+frame, seeds the video tracker with the highest-scoring matches, and stores the
+text alongside the tracking state. `load_prompts_run_video.py` and
+`load_prompts_run_dir.py` load that state as usual; the latter delegates to the
+former for every video.

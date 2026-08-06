@@ -39,6 +39,7 @@ from muggled_sam.demo_helpers.history_keeper import HistoryKeeper
 from muggled_sam.demo_helpers.loading import ask_for_path_if_missing, ask_for_model_path_if_missing
 from muggled_sam.demo_helpers.contours import get_contours_from_mask
 from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults,SAMVideoBuffer
+from muggled_sam.demo_helpers.video_prompt_state import unpack_tracking_state
 
 from muggled_sam.demo_helpers.saving import save_video_frames, get_save_name
 from muggled_sam.demo_helpers.ffmpeg import get_default_ffmpeg_command, verify_ffmpeg_path, save_video_stream
@@ -501,11 +502,17 @@ from collections import deque
 torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer,deque])
 device = device_config_dict["device"]
 loaded_data = torch.load(load_path, map_location=device, weights_only=False)
+loaded_objects, saved_text_prompt = unpack_tracking_state(loaded_data)
+
+if saved_text_prompt:
+    print(f"Loaded text prompt: {saved_text_prompt!r}", flush=True)
 
 # Rebuild memory_list
 memory_list = [None] * num_obj_buffers
 
-for objidx, mem in loaded_data.items():
+for objidx, mem in loaded_objects.items():
+    if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
+        raise ValueError(f"Prompt file contains invalid object-buffer index: {objidx!r}")
     memory_list[objidx] = mem
 
 if not any(mem is not None and mem.check_has_prompts() for mem in memory_list):
@@ -583,5 +590,4 @@ for objidx, savebuffer in enumerate(savebuffers_list):
             video_path, video_fps, objidx, png_per_frame_dict, ffmpeg_path, use_ffmpeg
         )
     pass
-
 
