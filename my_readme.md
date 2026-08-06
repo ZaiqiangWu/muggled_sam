@@ -25,6 +25,7 @@ python save_prompts_run_video.py --input_video input_video.mp4
 ```
 A window will pop up and then youcan set the points and bbox prompts interactively.
 You can use Shift + click to place multiple points.
+You can also set text prompt for each object.
 
 After finish setting the prompts, press `q` or `g` to close the user interface, the prompts will be saved as `./saved_tracking_state.pt`.
 
@@ -45,11 +46,5 @@ You can execute this command to generate segmentation results for visually check
 python check_generated_masks.py
 ```
 
-# TODO task
 
-With SAM3 weights, the video UI includes a **Set Text Prompt** button. Select a
-Buffer, pause the video, click the button, and type the phrase directly in the
-focused video window. Press Enter to apply it, Backspace to edit, or Esc to
-cancel. The best matching object in the current frame is assigned only to that
-Buffer. Repeat for each object as needed. Text prompts and their buffer
-assignments are saved in the tracking-state file and displayed when it is loaded.
+
