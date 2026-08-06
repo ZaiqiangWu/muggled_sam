@@ -47,13 +47,9 @@ python check_generated_masks.py
 
 # TODO task
 
-Enable text prompt like this, and the text prompt can be saved and loaded in above commands.
-```
-python save_prompts_run_video.py --input_video input_video.mp4 --text_prompt 'garments and hat'
-```
-
-`--text_prompt` requires SAM3 weights. It finds matching objects in the first
-frame, seeds the video tracker with the highest-scoring matches, and stores the
-text alongside the tracking state. `load_prompts_run_video.py` and
-`load_prompts_run_dir.py` load that state as usual; the latter delegates to the
-former for every video.
+With SAM3 weights, the video UI includes a **Set Text Prompt** button. Select a
+Buffer, pause the video, click the button, and type the phrase directly in the
+focused video window. Press Enter to apply it, Backspace to edit, or Esc to
+cancel. The best matching object in the current frame is assigned only to that
+Buffer. Repeat for each object as needed. Text prompts and their buffer
+assignments are saved in the tracking-state file and displayed when it is loaded.

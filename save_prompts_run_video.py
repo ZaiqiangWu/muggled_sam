@@ -66,18 +66,6 @@ parser = argparse.ArgumentParser(description="Script used to run Segment-Anythin
 parser.add_argument("-i", "--image_path", default=default_image_path, help="Path to input image")
 parser.add_argument("-m", "--model_path", default=default_model_path, type=str, help="Path to SAM model weights")
 parser.add_argument("--input_video", type=str, required=True,help="Path to input video")
-parser.add_argument(
-    "--text_prompt",
-    default=None,
-    type=str,
-    help="SAM3 text prompt used to seed video tracking on the first frame",
-)
-parser.add_argument(
-    "--text_score_threshold",
-    default=0.5,
-    type=float,
-    help="Minimum SAM3 text-detection score used to create a tracked object (default: 0.5)",
-)
 
 parser.add_argument(
     "-s",
@@ -214,8 +202,6 @@ use_webcam = args.use_webcam
 enable_crop_ui = args.crop
 bg_color_hex = args.bg_color_hex
 arg_ffmpeg = args.ffmpeg
-text_prompt = args.text_prompt.strip() if args.text_prompt is not None else None
-text_score_threshold = args.text_score_threshold
 
 # Set up device config
 device_config_dict = make_device_config(device_str, use_float32)
@@ -257,8 +243,6 @@ model_name = osp.basename(model_path)
 print("", "Loading model weights...", f"  @ {model_path}", sep="\n", flush=True)
 model_config_dict, sammodel = make_sam_from_state_dict(model_path)
 assert sammodel.name in ("samv2", "samv3"), "Only SAMv2/v3 models are supported for video predictions!"
-if text_prompt and sammodel.name != "samv3":
-    raise ValueError("--text_prompt requires SAM3 model weights")
 sammodel.to(**device_config_dict)
 
 # Set up access to video
@@ -430,7 +414,12 @@ store_prompt_btn = ImmediateButton("Store Prompt", text_scale=0.35, color=(145, 
 clear_prompts_btn = ImmediateButton("Clear Prompts", text_scale=0.35, color=(80, 110, 230))
 enable_history_btn = ToggleButton("Enable History", default_state=True, text_scale=0.35, on_color=(90, 85, 115))
 clear_history_btn = ImmediateButton("Clear History", text_scale=0.35, color=(130, 60, 90))
-force_same_min_width(store_prompt_btn, clear_prompts_btn, enable_history_btn, clear_history_btn)
+text_prompt_btn = ImmediateButton("Set Text Prompt", text_scale=0.35, color=(75, 115, 165)) if sammodel.name == "samv3" else None
+text_prompt_controls = (store_prompt_btn, clear_prompts_btn, enable_history_btn, clear_history_btn)
+if text_prompt_btn is not None:
+    text_prompt_controls += (text_prompt_btn,)
+force_same_min_width(*text_prompt_controls)
+text_prompt_text = ValueBlock("Text: ", "-", max_characters=18)
 
 
 # Create save UI
@@ -473,6 +462,7 @@ disp_layout = VStack(
     HStack(vram_text, objscore_text, frame_idx_text),
     HStack(num_prompts_text, track_btn, num_history_text),
     HStack(store_prompt_btn, clear_prompts_btn, reversal_btn, enable_history_btn, clear_history_btn),
+    HStack(text_prompt_btn, text_prompt_text) if text_prompt_btn is not None else None,
     footer_msgbar if show_info else None,
 ).set_debug_name("DisplayLayout")
 
@@ -500,6 +490,22 @@ window.attach_keypress_callback("v", buffer_btn_constraint.previous)
 window.attach_keypress_callback(KEY.TAB, store_prompt_btn.click)
 window.attach_keypress_callback("r", reversal_btn.toggle)
 
+
+def read_text_entry_keypress(keypress: int, text_buffer: str | None) -> tuple[str | None, str | None]:
+    """Update in-window text entry and return an optional submitted prompt."""
+    if text_buffer is None:
+        return None, None
+    if keypress in (KEY.ENTER, 10):
+        submitted_text = text_buffer.strip()
+        return None, submitted_text or None
+    if keypress == KEY.ESC:
+        return None, None
+    if keypress in (KEY.BACKSPACE, 127):
+        return text_buffer[:-1], None
+    if 32 <= keypress <= 126 and len(text_buffer) < 160:
+        return text_buffer + chr(keypress), None
+    return text_buffer, None
+
 # For clarity, some additional keypress codes
 KEY_ZOOM_IN = ord("=")
 KEY_ZOOM_OUT = ord("-")
@@ -523,34 +529,10 @@ savebuffers_list = [SaveBufferData.create() for _ in objiter]
 memory_list = [
     SAMVideoObjectResults.create(max_memory_history, max_pointer_history, prompt_history_length=32) for _ in objiter
 ]
-
-# A SAM3 text prompt uses the detection model on the first frame, then seeds the
-# normal video tracker with one memory per highest-scoring detected object.
-if text_prompt:
-    print("", f"Finding text prompt on first frame: {text_prompt!r}", sep="\n", flush=True)
-    detector_model = sammodel.make_detector_model()
-    detection_img, _, _ = detector_model.encode_detection_image(sample_frame, **imgenc_config_dict)
-    encoded_exemplars = detector_model.encode_exemplars(detection_img, text=text_prompt)
-    detection_results = detector_model.generate_detections(detection_img, encoded_exemplars)
-    detected_masks, _, detected_scores, _ = detector_model.filter_results(
-        *detection_results, score_threshold=text_score_threshold
-    )
-
-    if detected_masks is None or detected_masks.shape[0] == 0:
-        print(
-            f"No objects matched {text_prompt!r} at score >= {text_score_threshold}. "
-            "Add point/box prompts in the UI or lower --text_score_threshold.",
-            flush=True,
-        )
-    else:
-        # Detection queries are not score-sorted.  Track the strongest results
-        # first so their assignment to the finite object-buffer slots is stable.
-        detected_scores = detected_scores.flatten()
-        _, best_indices = torch.topk(detected_scores, k=min(num_obj_buffers, detected_scores.numel()))
-        for objidx, detection_idx in enumerate(best_indices.tolist()):
-            prompt_memory = sammodel.initialize_from_mask(encoded_img, detected_masks[detection_idx])
-            memory_list[objidx].store_prompt_result(0, prompt_memory)
-        print(f"Seeded {len(best_indices)} tracked object(s) from the text prompt.", flush=True)
+text_prompts_by_object = {}
+text_entry_buffer = None
+text_entry_buffer_index = None
+pending_text_prompt = None
 
 vreader.pause()
 curr_state = STATES.PAUSED
@@ -573,7 +555,15 @@ try:
 
         run_batch = False
         req_break, keypress = window.show(display_image, None if is_paused else 1)
-        if keypress == KEY_BATCH:
+        if text_entry_buffer is not None:
+            text_entry_buffer, submitted_text = read_text_entry_keypress(keypress, text_entry_buffer)
+            if text_entry_buffer is None:
+                window.toggle_keypress_callbacks(True)
+                pending_text_prompt = (text_entry_buffer_index, submitted_text) if submitted_text else None
+                text_entry_buffer_index = None
+            else:
+                text_prompt_text.set_value(f"Enter: {text_entry_buffer}_")
+        if text_entry_buffer is None and keypress == KEY_BATCH:
             print("Starting batch processing...")
             run_batch = True
             break
@@ -598,6 +588,12 @@ try:
         is_changed_buffer, buffer_select_idx, _ = buffer_btn_constraint.read()
         if is_changed_buffer:
             ui_elems.clear_prompts()
+        # Do not replace the live edit buffer with the previously saved prompt
+        # while the user is typing in the window.
+        if text_entry_buffer is None:
+            text_prompt_text.set_value(text_prompts_by_object.get(buffer_select_idx, "-"))
+        else:
+            text_prompt_text.set_value(f"Enter: {text_entry_buffer}_")
 
         # Allow the track button to play/pause the video
         is_trackstate_changed, is_track_on = track_btn.read()
@@ -611,10 +607,41 @@ try:
         if clear_prompts_btn.read():
             memory_list[buffer_select_idx].prompts_buffer.clear()
             maskresults_list[buffer_select_idx].clear()
+            text_prompts_by_object.pop(buffer_select_idx, None)
             track_idx_keeper.clear()
         if clear_history_btn.read():
             memory_list[buffer_select_idx].prevframe_buffer.clear()
             track_idx_keeper.clear()
+
+        if pending_text_prompt is not None:
+            prompt_buffer_index, entered_text = pending_text_prompt
+            pending_text_prompt = None
+            if entered_text is not None:
+                print(f"Finding Buffer {prompt_buffer_index + 1} text prompt: {entered_text!r}", flush=True)
+                # The frame may have changed while paused, so do not reuse a
+                # potentially stale image encoding from the prior iteration.
+                encoded_img, _, _ = sammodel.encode_image(frame, **imgenc_config_dict)
+                imgenc_idx_keeper.record(frame_idx)
+                detector_model = sammodel.make_detector_model()
+                detection_img, _, _ = detector_model.encode_detection_image(frame, **imgenc_config_dict)
+                encoded_exemplars = detector_model.encode_exemplars(detection_img, text=entered_text)
+                detection_results = detector_model.generate_detections(detection_img, encoded_exemplars)
+                detected_masks, _, detected_scores, _ = detector_model.filter_results(
+                    *detection_results, score_threshold=0.5
+                )
+                if detected_masks is None or detected_masks.shape[0] == 0:
+                    print(f"No object matched {entered_text!r} at score >= 0.5.", flush=True)
+                else:
+                    best_detection_idx = int(detected_scores.flatten().argmax())
+                    prompt_memory = sammodel.initialize_from_mask(encoded_img, detected_masks[best_detection_idx])
+                    memory_list[prompt_buffer_index].prompts_buffer.clear()
+                    memory_list[prompt_buffer_index].prevframe_buffer.clear()
+                    memory_list[prompt_buffer_index].store_prompt_result(frame_idx, prompt_memory)
+                    maskresults_list[prompt_buffer_index].clear()
+                    text_prompts_by_object[prompt_buffer_index] = entered_text
+                    text_prompt_text.set_value(entered_text)
+                    track_idx_keeper.clear()
+                    print(f"Seeded Buffer {prompt_buffer_index + 1} from its best text match.", flush=True)
 
         # Update text feedback
         vram_usage_mb = vram_report.get_vram_usage()
@@ -817,6 +844,27 @@ try:
         # Display final image
         display_image = disp_layout.render(**render_limit_dict)
         req_break, keypress = window.show(display_image, None if is_paused else 1)
+
+        # Read this immediately after the click is delivered.  Otherwise the
+        # first typed character can arrive before text-entry mode disables the
+        # normal q/g keyboard shortcuts.
+        if text_prompt_btn is not None and text_prompt_btn.read():
+            if not is_paused:
+                print("Pause the video before setting a text prompt.", flush=True)
+            else:
+                text_entry_buffer = ""
+                text_entry_buffer_index = buffer_select_idx
+                window.toggle_keypress_callbacks(False)
+                text_prompt_text.set_value("Enter text; Enter=apply, Esc=cancel")
+
+        if text_entry_buffer is not None:
+            text_entry_buffer, submitted_text = read_text_entry_keypress(keypress, text_entry_buffer)
+            if text_entry_buffer is None:
+                window.toggle_keypress_callbacks(True)
+                pending_text_prompt = (text_entry_buffer_index, submitted_text) if submitted_text else None
+                text_entry_buffer_index = None
+            else:
+                text_prompt_text.set_value(f"Enter: {text_entry_buffer}_")
         if req_break:
             break
 
@@ -926,7 +974,7 @@ for objidx in objiter:
     if memory_list[objidx].check_has_prompts():
         save_data[objidx] = memory_list[objidx]
 
-torch.save(make_tracking_state(save_data, text_prompt), save_path)
+saved_text_prompts = {objidx: text_prompts_by_object[objidx] for objidx in save_data if objidx in text_prompts_by_object}
+torch.save(make_tracking_state(save_data, saved_text_prompts), save_path)
 
 print(f"Saved tracking state to {save_path}")
-

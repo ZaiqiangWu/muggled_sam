@@ -502,10 +502,10 @@ from collections import deque
 torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer,deque])
 device = device_config_dict["device"]
 loaded_data = torch.load(load_path, map_location=device, weights_only=False)
-loaded_objects, saved_text_prompt = unpack_tracking_state(loaded_data)
+loaded_objects, saved_text_prompts = unpack_tracking_state(loaded_data)
 
-if saved_text_prompt:
-    print(f"Loaded text prompt: {saved_text_prompt!r}", flush=True)
+for objidx, saved_text_prompt in sorted(saved_text_prompts.items()):
+    print(f"Loaded Buffer {objidx + 1} text prompt: {saved_text_prompt!r}", flush=True)
 
 # Rebuild memory_list
 memory_list = [None] * num_obj_buffers
@@ -590,4 +590,3 @@ for objidx, savebuffer in enumerate(savebuffers_list):
             video_path, video_fps, objidx, png_per_frame_dict, ffmpeg_path, use_ffmpeg
         )
     pass
-
