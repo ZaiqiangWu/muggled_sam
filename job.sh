@@ -33,13 +33,15 @@
 #python load_prompts_run_video.py --prompt_path ./polo.pt --input_video ./videos/polo/polo_01.mp4
 #python load_prompts_run_video.py --prompt_path ./spacesuit.pt --input_video ./videos/spacesuit/spacesuit_00.mp4
 #python load_prompts_run_video.py --prompt_path ./spacesuit.pt --input_video ./videos/spacesuit/spacesuit_01.mp4
-python load_prompts_run_dir.py --prompt_path ./tracking_states/quilted_jacket.pt --input_dir ./videos/quilted_jacket/
-python load_prompts_run_dir.py --prompt_path ./tracking_states/suit1.pt --input_dir ./videos/suit1/
-python load_prompts_run_dir.py --prompt_path ./tracking_states/trench_coat.pt --input_dir ./videos/trench_coat/
-python load_prompts_run_dir.py --prompt_path ./tracking_states/vneck_knit.pt --input_dir ./videos/vneck_knit/
-python load_prompts_run_dir.py --prompt_path ./tracking_states/vneck_knit_open.pt --input_dir ./videos/vneck_knit_open/
+#python load_prompts_run_dir.py --prompt_path ./tracking_states/quilted_jacket.pt --input_dir ./videos/quilted_jacket/
+#python load_prompts_run_dir.py --prompt_path ./tracking_states/suit1.pt --input_dir ./videos/suit1/
+#python load_prompts_run_dir.py --prompt_path ./tracking_states/trench_coat.pt --input_dir ./videos/trench_coat/
+#python load_prompts_run_dir.py --prompt_path ./tracking_states/vneck_knit.pt --input_dir ./videos/vneck_knit/
+#python load_prompts_run_dir.py --prompt_path ./tracking_states/vneck_knit_open.pt --input_dir ./videos/vneck_knit_open/
+
+python load_prompts_run_dir.py --prompt_path ./pl0.pt --input_dir ./videos/pl0/
 
 
 
-#python check_generated_masks.py
+python check_generated_masks.py
 
