@@ -634,14 +634,22 @@ try:
                 else:
                     best_detection_idx = int(detected_scores.flatten().argmax())
                     prompt_memory = sammodel.initialize_from_mask(encoded_img, detected_masks[best_detection_idx])
-                    memory_list[prompt_buffer_index].prompts_buffer.clear()
-                    memory_list[prompt_buffer_index].prevframe_buffer.clear()
+                    # Keep earlier text/point prompt memories for this Buffer.
+                    # Repeating a text prompt on later frames therefore creates
+                    # multiple prompt frames instead of replacing the first one.
                     memory_list[prompt_buffer_index].store_prompt_result(frame_idx, prompt_memory)
+                    if clear_history_on_new_prompts:
+                        memory_list[prompt_buffer_index].prevframe_buffer.clear()
                     maskresults_list[prompt_buffer_index].clear()
                     text_prompts_by_object[prompt_buffer_index] = entered_text
                     text_prompt_text.set_value(entered_text)
                     track_idx_keeper.clear()
-                    print(f"Seeded Buffer {prompt_buffer_index + 1} from its best text match.", flush=True)
+                    num_text_prompt_frames, _ = memory_list[prompt_buffer_index].get_num_memories()
+                    print(
+                        f"Added text prompt frame to Buffer {prompt_buffer_index + 1} "
+                        f"({num_text_prompt_frames} prompt frame(s) stored).",
+                        flush=True,
+                    )
 
         # Update text feedback
         vram_usage_mb = vram_report.get_vram_usage()

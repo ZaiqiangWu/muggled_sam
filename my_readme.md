@@ -29,6 +29,10 @@ You can also set text prompt for each object.
 
 After finish setting the prompts, press `q` or `g` to close the user interface, the prompts will be saved as `./saved_tracking_state.pt`.
 
+For SAM3 text prompting, select a Buffer, pause the video, click **Set Text Prompt**,
+and type in the video window. Repeating this on later frames for the same Buffer
+adds another text-derived tracking prompt frame; it does not replace the earlier one.
+
 ### Perform video segmentation on a headless PC
 You can load the saved prompts and perform segmentation to a video on a headless PC.
 ```
