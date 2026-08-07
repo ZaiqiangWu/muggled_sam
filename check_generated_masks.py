@@ -108,7 +108,9 @@ def process_tar_dir(dir_path,gen_path):
     img_lists = [get_file_path_list(img_dir,'png') for img_dir in img_dirs]
     for img_list in img_lists:
         #print(img_list[0])
-        print(len(img_list))
+        print("Num of masks:",len(img_list))
+    lengths = [len(img_list) for img_list in img_lists]
+    assert len(set(lengths)) == 1, f"Mask frame counts differ: {lengths}"
     folder_name = mask_name
     target_dir = os.path.join(video_dir, garment_name,folder_name)
     os.makedirs(target_dir, exist_ok=True)
