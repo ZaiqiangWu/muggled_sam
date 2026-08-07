@@ -649,25 +649,25 @@ try:
                 detector_model = sammodel.make_detector_model()
                 detection_img, _, _ = detector_model.encode_detection_image(frame, **imgenc_config_dict)
                 encoded_exemplars = detector_model.encode_exemplars(detection_img, text=entered_text)
-                detection_results = detector_model.generate_detections(detection_img, encoded_exemplars)
-                detected_masks, _, detected_scores, _ = detector_model.filter_results(
-                    *detection_results, score_threshold=0.5
+                detection_masks, _, detection_scores, _ = detector_model.generate_detections(
+                    detection_img, encoded_exemplars
                 )
-                if detected_masks is None or detected_masks.shape[0] == 0:
-                    print(f"No object matched {entered_text!r} at score >= 0.5.", flush=True)
+                if detection_masks is None or detection_masks.shape[1] == 0:
+                    print(f"No text candidates were produced for {entered_text!r}.", flush=True)
                 else:
-                    # Show the best four text detections in the existing mask
-                    # candidate UI.  They are previews only until Store Prompt
-                    # is clicked.
-                    num_candidates = min(len(ui_elems.mask_btns), detected_scores.numel())
-                    best_scores, best_indices = torch.topk(detected_scores.flatten(), k=num_candidates)
+                    # Show the top text detections even when their confidence is
+                    # low.  The user chooses which candidate, if any, to store.
+                    # Applying a threshold here could leave the preview grid
+                    # blank before the user has a chance to inspect it.
+                    num_candidates = min(len(ui_elems.mask_btns), detection_scores.numel())
+                    best_scores, best_indices = torch.topk(detection_scores.flatten(), k=num_candidates)
                     candidate_masks = torch.full(
-                        (1, len(ui_elems.mask_btns), *detected_masks.shape[-2:]),
+                        (1, len(ui_elems.mask_btns), *detection_masks.shape[-2:]),
                         -7,
-                        dtype=detected_masks.dtype,
-                        device=detected_masks.device,
+                        dtype=detection_masks.dtype,
+                        device=detection_masks.device,
                     )
-                    candidate_masks[0, :num_candidates] = detected_masks[best_indices]
+                    candidate_masks[0, :num_candidates] = detection_masks[0, best_indices]
                     candidate_scores = torch.zeros(
                         (1, len(ui_elems.mask_btns)), dtype=best_scores.dtype, device=best_scores.device
                     )
