@@ -35,9 +35,28 @@ You can load the saved prompts and perform segmentation to a video on a headless
 python load_prompts_run_video.py --prompt_path ./saved_tracking_state.pt --input_video ./videos/spacesuit/spacesuit_01.mp4
 ```
 
+If normal video tracking drifts, run the saved per-Buffer text prompts directly
+on every frame instead (SAM3 weights required; substantially slower):
+```
+python load_prompts_run_video_text_each_frame.py --prompt_path ./saved_tracking_state.pt --input_video ./videos/spacesuit/spacesuit_01.mp4
+```
+The default text-detection confidence threshold is `0.5`. Lower it when the
+object is missed in difficult frames, at the cost of more possible false
+matches. For example:
+```
+python load_prompts_run_video_text_each_frame.py \
+    --prompt_path ./saved_tracking_state.pt \
+    --input_video ./videos/trench_coat/trench_coat_00.mp4 \
+    --pure_text_score_threshold 0.3
+```
+
 You can also load the saved prompts and perform segmentation to videos in a director:
 ```
 python load_prompts_run_dir.py --prompt_path ./tracking_states/quilted_jacket.pt --input_dir ./videos/quilted_jacket/
+```
+To apply saved text prompts independently on every frame of every video:
+```
+python load_prompts_run_dir_text_each_frame.py --prompt_path ./saved_tracking_state.pt --input_dir ./videos/trench_coat/ --pure_text_score_threshold 0.3
 ```
 
 ### Check the segmentation results
@@ -45,6 +64,3 @@ You can execute this command to generate segmentation results for visually check
 ```
 python check_generated_masks.py
 ```
-
-
-

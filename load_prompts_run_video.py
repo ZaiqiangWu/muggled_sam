@@ -31,7 +31,7 @@ from muggled_sam.demo_helpers.ui.base import force_same_min_width
 from muggled_sam.demo_helpers.ui.overlays import DrawPolygonsOverlay
 from muggled_sam.demo_helpers.ui.helpers.images import FrameCompositing
 
-from muggled_sam.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI
+from muggled_sam.demo_helpers.shared_ui_layout import PromptUIControl, PromptUI, make_hires_mask_uint8
 from muggled_sam.demo_helpers.crop_ui import run_crop_ui
 
 from muggled_sam.demo_helpers.misc import PeriodicVRAMReport, make_device_config, get_default_device_string
@@ -68,6 +68,17 @@ parser.add_argument("-i", "--image_path", default=default_image_path, help="Path
 parser.add_argument("-m", "--model_path", default=default_model_path, type=str, help="Path to SAM model weights")
 parser.add_argument("--input_video", required=True, type=str,help="Path to input video")
 parser.add_argument("--prompt_path", type=str,default='./saved_tracking_state.pt',help="Path to input video")
+parser.add_argument(
+    "--pure_text",
+    action="store_true",
+    help="Run saved SAM3 text prompts independently on every frame instead of video tracking",
+)
+parser.add_argument(
+    "--pure_text_score_threshold",
+    default=0.5,
+    type=float,
+    help="Minimum detection score for --pure_text (default: 0.5)",
+)
 
 parser.add_argument(
     "-s",
@@ -204,6 +215,8 @@ use_webcam = args.use_webcam
 enable_crop_ui = args.crop
 bg_color_hex = args.bg_color_hex
 arg_ffmpeg = args.ffmpeg
+use_pure_text = args.pure_text
+pure_text_score_threshold = args.pure_text_score_threshold
 
 # Set up device config
 device_config_dict = make_device_config(device_str, use_float32)
@@ -507,6 +520,15 @@ loaded_objects, saved_text_prompts = unpack_tracking_state(loaded_data)
 for objidx, saved_text_prompt in sorted(saved_text_prompts.items()):
     print(f"Loaded Buffer {objidx + 1} text prompt: {saved_text_prompt!r}", flush=True)
 
+if use_pure_text:
+    if sammodel.name != "samv3":
+        raise ValueError("--pure_text requires SAM3 model weights")
+    if not saved_text_prompts:
+        raise ValueError("Prompt file has no per-buffer text prompts for --pure_text")
+    for objidx in saved_text_prompts:
+        if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
+            raise ValueError(f"Prompt file contains invalid text-prompt buffer index: {objidx!r}")
+
 # Rebuild memory_list
 memory_list = [None] * num_obj_buffers
 
@@ -515,13 +537,22 @@ for objidx, mem in loaded_objects.items():
         raise ValueError(f"Prompt file contains invalid object-buffer index: {objidx!r}")
     memory_list[objidx] = mem
 
-if not any(mem is not None and mem.check_has_prompts() for mem in memory_list):
+if not use_pure_text and not any(mem is not None and mem.check_has_prompts() for mem in memory_list):
     print("No valid prompts found. Exiting.")
     exit(0)
 
 
 
-move_memory_to_device(memory_list, device)
+if not use_pure_text:
+    move_memory_to_device(memory_list, device)
+
+detector_model = sammodel.make_detector_model() if use_pure_text else None
+if use_pure_text:
+    print(
+        f"Pure-text mode: running {len(saved_text_prompts)} saved text prompt(s) on every frame "
+        f"at score >= {pure_text_score_threshold}.",
+        flush=True,
+    )
 
 from tqdm import tqdm
 pbar = tqdm(total=total_frames)
@@ -543,36 +574,62 @@ with torch.inference_mode():
 
         prev_real_idx = real_frame_idx
 
-        # Encode frame
-        encoded_img, _, _ = sammodel.encode_image(frame, **imgenc_config_dict)
+        if use_pure_text:
+            detection_img, _, _ = detector_model.encode_detection_image(frame, **imgenc_config_dict)
+            mask_by_text_prompt = {}
+            for objidx, text_prompt in saved_text_prompts.items():
+                if text_prompt not in mask_by_text_prompt:
+                    encoded_exemplars = detector_model.encode_exemplars(detection_img, text=text_prompt)
+                    detection_results = detector_model.generate_detections(detection_img, encoded_exemplars)
+                    detected_masks, _, detected_scores, _ = detector_model.filter_results(
+                        *detection_results, score_threshold=pure_text_score_threshold
+                    )
+                    if detected_masks is None or detected_masks.shape[0] == 0:
+                        mask_by_text_prompt[text_prompt] = None
+                    else:
+                        best_detection_idx = int(detected_scores.flatten().argmax())
+                        mask_by_text_prompt[text_prompt] = make_hires_mask_uint8(
+                            detected_masks[best_detection_idx], frame.shape[:2]
+                        )
 
-        for objidx in objiter:
+                save_mask = mask_by_text_prompt[text_prompt]
+                if save_mask is not None:
+                    save_frame = save_masking.mask_frame(frame, save_mask)
+                    ok, png = cv2.imencode(".png", save_frame)
+                    if ok:
+                        savebuffers_list[objidx].png_per_frame_dict[real_frame_idx] = png
 
-            if not memory_list[objidx]:
-                continue
-            if not memory_list[objidx].check_has_prompts():
-                continue
+        else:
+            # Encode frame
+            encoded_img, _, _ = sammodel.encode_image(frame, **imgenc_config_dict)
 
-            obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = sammodel.step_video_masking(
-                    encoded_img, **memory_list[objidx].to_dict()
-                )
+            for objidx in objiter:
 
-            tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
-            maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
+                if not memory_list[objidx]:
+                    continue
+                if not memory_list[objidx].check_has_prompts():
+                    continue
 
-            obj_score = float(obj_score.squeeze().cpu().float().numpy())
-            tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
+                obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = sammodel.step_video_masking(
+                        encoded_img, **memory_list[objidx].to_dict()
+                    )
 
-            # Store memory
-            memory_list[objidx].store_frame_result(frame_idx, mem_enc, obj_ptr)
+                tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
+                maskresults_list[objidx].update(mask_preds, tracked_mask_idx, obj_score)
 
-            # Save mask
-            save_mask = uictrl.create_hires_mask_uint8(mask_preds, tracked_mask_idx, frame.shape[:2])
-            save_frame = save_masking.mask_frame(frame, save_mask)
+                obj_score = float(obj_score.squeeze().cpu().float().numpy())
+                tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
 
-            ok, png = cv2.imencode(".png", save_frame)
-            if ok:
-                savebuffers_list[objidx].png_per_frame_dict[real_frame_idx] = png
+                # Store memory
+                memory_list[objidx].store_frame_result(frame_idx, mem_enc, obj_ptr)
+
+                # Save mask
+                save_mask = uictrl.create_hires_mask_uint8(mask_preds, tracked_mask_idx, frame.shape[:2])
+                save_frame = save_masking.mask_frame(frame, save_mask)
+
+                ok, png = cv2.imencode(".png", save_frame)
+                if ok:
+                    savebuffers_list[objidx].png_per_frame_dict[real_frame_idx] = png
 
         pbar.update(1)
 
