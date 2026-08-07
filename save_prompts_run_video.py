@@ -820,7 +820,10 @@ try:
             has_text_preview = (
                 selected_text_preview is not None and selected_text_preview["frame_idx"] == frame_idx
             )
-            if need_prompt_encode and (have_user_prompts or not have_track_prompts):
+            # A text candidate preview already supplies its own mask set.  Do
+            # not replace it with the blank point/box-prompt output merely
+            # because this Buffer has no stored tracking prompt yet.
+            if need_prompt_encode and (have_user_prompts or not have_track_prompts) and not has_text_preview:
                 encoded_prompts = sammodel.encode_prompts(*prompts)
                 paused_mask_preds, _ = sammodel.generate_masks(
                     encoded_img,
