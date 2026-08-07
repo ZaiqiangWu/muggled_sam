@@ -415,9 +415,12 @@ clear_prompts_btn = ImmediateButton("Clear Prompts", text_scale=0.35, color=(80,
 enable_history_btn = ToggleButton("Enable History", default_state=True, text_scale=0.35, on_color=(90, 85, 115))
 clear_history_btn = ImmediateButton("Clear History", text_scale=0.35, color=(130, 60, 90))
 text_prompt_btn = ImmediateButton("Set Text Prompt", text_scale=0.35, color=(75, 115, 165)) if sammodel.name == "samv3" else None
+reuse_text_prompt_btn = (
+    ImmediateButton("Reuse Text Prompt", text_scale=0.35, color=(75, 115, 165)) if sammodel.name == "samv3" else None
+)
 text_prompt_controls = (store_prompt_btn, clear_prompts_btn, enable_history_btn, clear_history_btn)
 if text_prompt_btn is not None:
-    text_prompt_controls += (text_prompt_btn,)
+    text_prompt_controls += (text_prompt_btn, reuse_text_prompt_btn)
 force_same_min_width(*text_prompt_controls)
 text_prompt_text = ValueBlock("Text: ", "-", max_characters=18)
 
@@ -462,7 +465,7 @@ disp_layout = VStack(
     HStack(vram_text, objscore_text, frame_idx_text),
     HStack(num_prompts_text, track_btn, num_history_text),
     HStack(store_prompt_btn, clear_prompts_btn, reversal_btn, enable_history_btn, clear_history_btn),
-    HStack(text_prompt_btn, text_prompt_text) if text_prompt_btn is not None else None,
+    HStack(text_prompt_btn, reuse_text_prompt_btn, text_prompt_text) if text_prompt_btn is not None else None,
     footer_msgbar if show_info else None,
 ).set_debug_name("DisplayLayout")
 
@@ -864,6 +867,19 @@ try:
                 text_entry_buffer_index = buffer_select_idx
                 window.toggle_keypress_callbacks(False)
                 text_prompt_text.set_value("Enter text; Enter=apply, Esc=cancel")
+
+        # Re-run this Buffer's existing text prompt on the current frame without
+        # opening text-entry mode.  The resulting memory is appended as another
+        # prompt frame by the shared pending-text handling on the next loop.
+        if reuse_text_prompt_btn is not None and reuse_text_prompt_btn.read():
+            saved_text_prompt = text_prompts_by_object.get(buffer_select_idx)
+            if not is_paused:
+                print("Pause the video before reusing a text prompt.", flush=True)
+            elif not saved_text_prompt:
+                print(f"Buffer {buffer_select_idx + 1} has no text prompt to reuse.", flush=True)
+            else:
+                pending_text_prompt = (buffer_select_idx, saved_text_prompt)
+                print(f"Reusing Buffer {buffer_select_idx + 1} text prompt: {saved_text_prompt!r}", flush=True)
 
         if text_entry_buffer is not None:
             text_entry_buffer, submitted_text = read_text_entry_keypress(keypress, text_entry_buffer)

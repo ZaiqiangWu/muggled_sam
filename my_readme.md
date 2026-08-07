@@ -32,6 +32,8 @@ After finish setting the prompts, press `q` or `g` to close the user interface, 
 For SAM3 text prompting, select a Buffer, pause the video, click **Set Text Prompt**,
 and type in the video window. Repeating this on later frames for the same Buffer
 adds another text-derived tracking prompt frame; it does not replace the earlier one.
+To use the same phrase on a later frame without typing it again, select that
+Buffer, pause on the new frame, and click **Reuse Text Prompt**.
 
 ### Perform video segmentation on a headless PC
 You can load the saved prompts and perform segmentation to a video on a headless PC.
