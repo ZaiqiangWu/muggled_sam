@@ -39,7 +39,7 @@
 #python load_prompts_run_dir.py --prompt_path ./tracking_states/vneck_knit.pt --input_dir ./videos/vneck_knit/
 #python load_prompts_run_dir.py --prompt_path ./tracking_states/vneck_knit_open.pt --input_dir ./videos/vneck_knit_open/
 
-python load_prompts_run_dir_text_each_frame.py --prompt_path ./pl0.pt --input_dir ./videos/pl0/
+python load_prompts_run_dir_text_each_frame.py --prompt_path ./pl0.pt --input_dir ./videos/pl0/ --pure_text_score_threshold 0.3
 
 
 
