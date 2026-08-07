@@ -37,6 +37,8 @@ Buffer, pause on the new frame, and click **Reuse Text Prompt**.
 Text prompts first show up to four detection candidates. Select the desired
 candidate in the preview UI, then click **Store Prompt**; only this final step
 adds the selected text candidate to the tracking memory.
+Changing frames discards unconfirmed candidates, but retains the entered text;
+click **Reuse Text Prompt** on the new frame to generate fresh candidates.
 
 ### Perform video segmentation on a headless PC
 You can load the saved prompts and perform segmentation to a video on a headless PC.

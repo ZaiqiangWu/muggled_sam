@@ -533,6 +533,7 @@ memory_list = [
     SAMVideoObjectResults.create(max_memory_history, max_pointer_history, prompt_history_length=32) for _ in objiter
 ]
 text_prompts_by_object = {}
+text_prompt_drafts_by_object = {}
 text_candidate_previews = {}
 text_entry_buffer = None
 text_entry_buffer_index = None
@@ -607,7 +608,9 @@ try:
         if text_entry_buffer is None and active_candidate is not None and active_candidate["frame_idx"] == frame_idx:
             text_prompt_text.set_value(f"Preview: {active_candidate['text_prompt']}")
         elif text_entry_buffer is None:
-            text_prompt_text.set_value(text_prompts_by_object.get(buffer_select_idx, "-"))
+            text_prompt_text.set_value(
+                text_prompt_drafts_by_object.get(buffer_select_idx, text_prompts_by_object.get(buffer_select_idx, "-"))
+            )
         else:
             text_prompt_text.set_value(f"Enter: {text_entry_buffer}_")
 
@@ -624,6 +627,7 @@ try:
             memory_list[buffer_select_idx].prompts_buffer.clear()
             maskresults_list[buffer_select_idx].clear()
             text_prompts_by_object.pop(buffer_select_idx, None)
+            text_prompt_drafts_by_object.pop(buffer_select_idx, None)
             text_candidate_previews.pop(buffer_select_idx, None)
             track_idx_keeper.clear()
         if clear_history_btn.read():
@@ -634,6 +638,9 @@ try:
             prompt_buffer_index, entered_text = pending_text_prompt
             pending_text_prompt = None
             if entered_text is not None:
+                # Keep the phrase available for reuse even if this frame has no
+                # acceptable detection or its unconfirmed candidates are later discarded.
+                text_prompt_drafts_by_object[prompt_buffer_index] = entered_text
                 print(f"Finding Buffer {prompt_buffer_index + 1} text prompt: {entered_text!r}", flush=True)
                 # The frame may have changed while paused, so do not reuse a
                 # potentially stale image encoding from the prior iteration.
@@ -824,6 +831,7 @@ try:
                         if clear_history_on_new_prompts:
                             memory_list[buffer_select_idx].prevframe_buffer.clear()
                         text_prompts_by_object[buffer_select_idx] = selected_text_preview["text_prompt"]
+                        text_prompt_drafts_by_object[buffer_select_idx] = selected_text_preview["text_prompt"]
                         text_candidate_previews.pop(buffer_select_idx, None)
                         track_idx_keeper.clear()
                         num_text_prompt_frames, _ = memory_list[buffer_select_idx].get_num_memories()
@@ -927,7 +935,9 @@ try:
         # opening text-entry mode.  The resulting memory is appended as another
         # prompt frame by the shared pending-text handling on the next loop.
         if reuse_text_prompt_btn is not None and reuse_text_prompt_btn.read():
-            saved_text_prompt = text_prompts_by_object.get(buffer_select_idx)
+            saved_text_prompt = text_prompt_drafts_by_object.get(
+                buffer_select_idx, text_prompts_by_object.get(buffer_select_idx)
+            )
             if not is_paused:
                 print("Pause the video before reusing a text prompt.", flush=True)
             elif not saved_text_prompt:
