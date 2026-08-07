@@ -533,6 +533,7 @@ memory_list = [
     SAMVideoObjectResults.create(max_memory_history, max_pointer_history, prompt_history_length=32) for _ in objiter
 ]
 text_prompts_by_object = {}
+text_candidate_previews = {}
 text_entry_buffer = None
 text_entry_buffer_index = None
 pending_text_prompt = None
@@ -548,6 +549,15 @@ try:
 
         # Update frame id
         frame_idx_text.set_value(f"{frame_idx}/{total_frames}")
+
+        # Text candidates are valid only for the frame on which detection ran.
+        # Discard unconfirmed candidates after seeking or advancing the video.
+        stale_candidate_indices = [
+            objidx for objidx, preview in text_candidate_previews.items() if preview["frame_idx"] != frame_idx
+        ]
+        for objidx in stale_candidate_indices:
+            text_candidate_previews.pop(objidx)
+            maskresults_list[objidx].clear()
 
         # Stop tracking at last frame
         if not end_reached and frame_idx >= total_frames - 1:
@@ -593,7 +603,10 @@ try:
             ui_elems.clear_prompts()
         # Do not replace the live edit buffer with the previously saved prompt
         # while the user is typing in the window.
-        if text_entry_buffer is None:
+        active_candidate = text_candidate_previews.get(buffer_select_idx)
+        if text_entry_buffer is None and active_candidate is not None and active_candidate["frame_idx"] == frame_idx:
+            text_prompt_text.set_value(f"Preview: {active_candidate['text_prompt']}")
+        elif text_entry_buffer is None:
             text_prompt_text.set_value(text_prompts_by_object.get(buffer_select_idx, "-"))
         else:
             text_prompt_text.set_value(f"Enter: {text_entry_buffer}_")
@@ -611,6 +624,7 @@ try:
             memory_list[buffer_select_idx].prompts_buffer.clear()
             maskresults_list[buffer_select_idx].clear()
             text_prompts_by_object.pop(buffer_select_idx, None)
+            text_candidate_previews.pop(buffer_select_idx, None)
             track_idx_keeper.clear()
         if clear_history_btn.read():
             memory_list[buffer_select_idx].prevframe_buffer.clear()
@@ -635,22 +649,36 @@ try:
                 if detected_masks is None or detected_masks.shape[0] == 0:
                     print(f"No object matched {entered_text!r} at score >= 0.5.", flush=True)
                 else:
-                    best_detection_idx = int(detected_scores.flatten().argmax())
-                    prompt_memory = sammodel.initialize_from_mask(encoded_img, detected_masks[best_detection_idx])
-                    # Keep earlier text/point prompt memories for this Buffer.
-                    # Repeating a text prompt on later frames therefore creates
-                    # multiple prompt frames instead of replacing the first one.
-                    memory_list[prompt_buffer_index].store_prompt_result(frame_idx, prompt_memory)
-                    if clear_history_on_new_prompts:
-                        memory_list[prompt_buffer_index].prevframe_buffer.clear()
-                    maskresults_list[prompt_buffer_index].clear()
-                    text_prompts_by_object[prompt_buffer_index] = entered_text
-                    text_prompt_text.set_value(entered_text)
+                    # Show the best four text detections in the existing mask
+                    # candidate UI.  They are previews only until Store Prompt
+                    # is clicked.
+                    num_candidates = min(len(ui_elems.mask_btns), detected_scores.numel())
+                    best_scores, best_indices = torch.topk(detected_scores.flatten(), k=num_candidates)
+                    candidate_masks = torch.full(
+                        (1, len(ui_elems.mask_btns), *detected_masks.shape[-2:]),
+                        -7,
+                        dtype=detected_masks.dtype,
+                        device=detected_masks.device,
+                    )
+                    candidate_masks[0, :num_candidates] = detected_masks[best_indices]
+                    candidate_scores = torch.zeros(
+                        (1, len(ui_elems.mask_btns)), dtype=best_scores.dtype, device=best_scores.device
+                    )
+                    candidate_scores[0, :num_candidates] = best_scores
+                    text_candidate_previews[prompt_buffer_index] = {
+                        "frame_idx": frame_idx,
+                        "text_prompt": entered_text,
+                        "mask_predictions": candidate_masks,
+                        "scores": candidate_scores,
+                        "num_candidates": num_candidates,
+                    }
+                    maskresults_list[prompt_buffer_index].update(candidate_masks, 0, float(best_scores[0]))
+                    ui_elems.clear_prompts()
+                    text_prompt_text.set_value(f"Preview: {entered_text}")
                     track_idx_keeper.clear()
-                    num_text_prompt_frames, _ = memory_list[prompt_buffer_index].get_num_memories()
                     print(
-                        f"Added text prompt frame to Buffer {prompt_buffer_index + 1} "
-                        f"({num_text_prompt_frames} prompt frame(s) stored).",
+                        f"Showing {num_candidates} text candidate(s) for Buffer {prompt_buffer_index + 1}. "
+                        "Select one, then click Store Prompt to save it.",
                         flush=True,
                     )
 
@@ -690,6 +718,7 @@ try:
         if is_playback_adjusting:
             for maskresult in maskresults_list:
                 maskresult.clear()
+            text_candidate_previews.clear()
 
             ui_elems.clear_prompts()
             vreader.pause()
@@ -760,6 +789,10 @@ try:
             need_prompt_encode, prompts = uictrl.read_prompts()
             have_user_prompts = sammodel.check_have_prompts(*prompts)
             have_track_prompts = any(mem.check_has_prompts() for mem in memory_list)
+            selected_text_preview = text_candidate_previews.get(buffer_select_idx)
+            has_text_preview = (
+                selected_text_preview is not None and selected_text_preview["frame_idx"] == frame_idx
+            )
             if need_prompt_encode and (have_user_prompts or not have_track_prompts):
                 encoded_prompts = sammodel.encode_prompts(*prompts)
                 paused_mask_preds, _ = sammodel.generate_masks(
@@ -771,7 +804,7 @@ try:
                 track_idx_keeper.clear()
 
             # If there are no user prompts but there are tracking prompts, run the tracker to get a segmentation
-            if have_track_prompts and not have_user_prompts and is_changed_track_idx:
+            if have_track_prompts and not have_user_prompts and is_changed_track_idx and not has_text_preview:
                 selected_memory_dict = memory_list[buffer_select_idx].to_dict()
                 paused_obj_score, _, paused_mask_preds, _, _ = sammodel.step_video_masking(
                     encoded_img, **selected_memory_dict
@@ -781,12 +814,31 @@ try:
 
             # Store encoded prompts as needed
             if store_prompt_btn.read():
-                _, init_mem, init_ptr = sammodel.initialize_video_masking(
-                    encoded_img,
-                    *prompts,
-                    mask_index_select=paused_mask_idx,
-                )
-                memory_list[buffer_select_idx].store_prompt_result(frame_idx, init_mem, init_ptr)
+                if has_text_preview:
+                    if paused_mask_idx >= selected_text_preview["num_candidates"]:
+                        print("Select a non-empty text candidate before storing.", flush=True)
+                    else:
+                        selected_mask = selected_text_preview["mask_predictions"][0, paused_mask_idx]
+                        init_mem = sammodel.initialize_from_mask(encoded_img, selected_mask)
+                        memory_list[buffer_select_idx].store_prompt_result(frame_idx, init_mem)
+                        if clear_history_on_new_prompts:
+                            memory_list[buffer_select_idx].prevframe_buffer.clear()
+                        text_prompts_by_object[buffer_select_idx] = selected_text_preview["text_prompt"]
+                        text_candidate_previews.pop(buffer_select_idx, None)
+                        track_idx_keeper.clear()
+                        num_text_prompt_frames, _ = memory_list[buffer_select_idx].get_num_memories()
+                        print(
+                            f"Stored text candidate for Buffer {buffer_select_idx + 1} "
+                            f"({num_text_prompt_frames} prompt frame(s) stored).",
+                            flush=True,
+                        )
+                else:
+                    _, init_mem, init_ptr = sammodel.initialize_video_masking(
+                        encoded_img,
+                        *prompts,
+                        mask_index_select=paused_mask_idx,
+                    )
+                    memory_list[buffer_select_idx].store_prompt_result(frame_idx, init_mem, init_ptr)
                 ui_elems.clear_prompts()
 
             # Store user-interaction results for selected object while paused
@@ -826,6 +878,9 @@ try:
         selected_obj_score = maskresults_list[buffer_select_idx].objscore
         ui_elems.masks_constraint.change_to(selected_mask_idx)
         uictrl.update_mask_previews(selected_mask_preds, invert_mask=is_inverted_mask)
+        selected_text_preview = text_candidate_previews.get(buffer_select_idx)
+        if selected_text_preview is not None and selected_text_preview["frame_idx"] == frame_idx:
+            ui_elems.draw_iou_predictions(selected_text_preview["scores"])
 
         # Update the (selected) object score
         objscore_text.set_value(round(selected_obj_score, 1))

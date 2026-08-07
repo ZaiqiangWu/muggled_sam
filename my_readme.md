@@ -34,6 +34,9 @@ and type in the video window. Repeating this on later frames for the same Buffer
 adds another text-derived tracking prompt frame; it does not replace the earlier one.
 To use the same phrase on a later frame without typing it again, select that
 Buffer, pause on the new frame, and click **Reuse Text Prompt**.
+Text prompts first show up to four detection candidates. Select the desired
+candidate in the preview UI, then click **Store Prompt**; only this final step
+adds the selected text candidate to the tracking memory.
 
 ### Perform video segmentation on a headless PC
 You can load the saved prompts and perform segmentation to a video on a headless PC.
