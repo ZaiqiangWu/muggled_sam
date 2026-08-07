@@ -577,6 +577,7 @@ with torch.inference_mode():
         if use_pure_text:
             detection_img, _, _ = detector_model.encode_detection_image(frame, **imgenc_config_dict)
             mask_by_text_prompt = {}
+            black_png = None
             for objidx, text_prompt in saved_text_prompts.items():
                 if text_prompt not in mask_by_text_prompt:
                     encoded_exemplars = detector_model.encode_exemplars(detection_img, text=text_prompt)
@@ -593,7 +594,21 @@ with torch.inference_mode():
                         )
 
                 save_mask = mask_by_text_prompt[text_prompt]
-                if save_mask is not None:
+                if save_mask is None:
+                    # Keep output frame counts aligned with the input video.
+                    # Match the normal output's channel layout, then make an
+                    # explicitly opaque black image for failed detections.
+                    if black_png is None:
+                        empty_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                        black_frame = np.zeros_like(save_masking.mask_frame(frame, empty_mask))
+                        if black_frame.ndim == 3 and black_frame.shape[2] == 4:
+                            black_frame[:, :, 3] = 255
+                        ok, black_png = cv2.imencode(".png", black_frame)
+                        if not ok:
+                            black_png = None
+                    if black_png is not None:
+                        savebuffers_list[objidx].png_per_frame_dict[real_frame_idx] = black_png
+                else:
                     save_frame = save_masking.mask_frame(frame, save_mask)
                     ok, png = cv2.imencode(".png", save_frame)
                     if ok:

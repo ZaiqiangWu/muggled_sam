@@ -42,7 +42,9 @@ python load_prompts_run_video_text_each_frame.py --prompt_path ./saved_tracking_
 ```
 The default text-detection confidence threshold is `0.5`. Lower it when the
 object is missed in difficult frames, at the cost of more possible false
-matches. For example:
+matches. If no detection meets the threshold, the per-frame text scripts save
+an all-black output for that frame so each Buffer has one output per input video
+frame. For example:
 ```
 python load_prompts_run_video_text_each_frame.py \
     --prompt_path ./saved_tracking_state.pt \
