@@ -655,12 +655,31 @@ try:
                 if detection_masks is None or detection_masks.shape[1] == 0:
                     print(f"No text candidates were produced for {entered_text!r}.", flush=True)
                 else:
-                    # Show the top text detections even when their confidence is
-                    # low.  The user chooses which candidate, if any, to store.
-                    # Applying a threshold here could leave the preview grid
-                    # blank before the user has a chance to inspect it.
-                    num_candidates = min(len(ui_elems.mask_btns), detection_scores.numel())
-                    best_scores, best_indices = torch.topk(detection_scores.flatten(), k=num_candidates)
+                    # Some detection queries can score well while producing an
+                    # empty mask.  Exclude those from the candidate UI so the
+                    # preview grid contains masks a user can actually inspect.
+                    all_masks = detection_masks[0]
+                    all_scores = detection_scores.flatten()
+                    min_foreground_pixels = max(32, all_masks.shape[-2] * all_masks.shape[-1] // 2000)
+                    foreground_pixel_counts = (all_masks > 0).flatten(1).sum(dim=1)
+                    valid_candidate_indices = torch.nonzero(
+                        foreground_pixel_counts >= min_foreground_pixels, as_tuple=False
+                    ).flatten()
+                    if valid_candidate_indices.numel() == 0:
+                        print(
+                            f"No non-empty text masks found for {entered_text!r}. "
+                            "Try another frame or a different prompt.",
+                            flush=True,
+                        )
+                        continue
+
+                    # Show the best non-empty detections even when their
+                    # confidence is low. The user decides whether to store one.
+                    num_candidates = min(len(ui_elems.mask_btns), valid_candidate_indices.numel())
+                    best_scores, best_local_indices = torch.topk(
+                        all_scores[valid_candidate_indices], k=num_candidates
+                    )
+                    best_indices = valid_candidate_indices[best_local_indices]
                     candidate_masks = torch.full(
                         (1, len(ui_elems.mask_btns), *detection_masks.shape[-2:]),
                         -7,
@@ -685,7 +704,8 @@ try:
                     track_idx_keeper.clear()
                     print(
                         f"Showing {num_candidates} text candidate(s) for Buffer {prompt_buffer_index + 1}. "
-                        "Select one, then click Store Prompt to save it.",
+                        "Select one, then click Store Prompt to save it. "
+                        f"Foreground pixels: {foreground_pixel_counts[best_indices].tolist()}",
                         flush=True,
                     )
 
