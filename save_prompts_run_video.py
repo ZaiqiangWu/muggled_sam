@@ -880,7 +880,7 @@ try:
         uictrl.update_mask_previews(selected_mask_preds, invert_mask=is_inverted_mask)
         selected_text_preview = text_candidate_previews.get(buffer_select_idx)
         if selected_text_preview is not None and selected_text_preview["frame_idx"] == frame_idx:
-            ui_elems.draw_iou_predictions(selected_text_preview["scores"])
+            uictrl.draw_iou_predictions(selected_text_preview["scores"])
 
         # Update the (selected) object score
         objscore_text.set_value(round(selected_obj_score, 1))
