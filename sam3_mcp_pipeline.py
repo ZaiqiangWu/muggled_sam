@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import math
 import random
+import uuid
 
 import cv2
 import numpy as np
@@ -244,6 +245,52 @@ def overlay(frame, mask):
     return result
 
 
+def ensure_qa_contact_sheet(directory, preview_frames):
+    """Create/cache a contact sheet from existing PNGs only; no video/model access."""
+    directory = Path(directory)
+    indices = sorted(set(preview_frames))
+    if not indices:
+        raise ValueError('No QA previews available for contact sheet')
+    sources = [directory/'previews'/f'{index:08d}.png' for index in indices]
+    signature = [dict(frame=index, mtime_ns=path.stat().st_mtime_ns, size=path.stat().st_size)
+                 for index, path in zip(indices, sources)]
+    sheet = directory/'qa_contact_sheet.png'
+    cache = directory/'qa_contact_sheet.json'
+    if sheet.is_file() and cache.is_file():
+        try:
+            if json.loads(cache.read_text()) == signature:
+                return sheet
+        except (OSError, ValueError):
+            pass
+    columns, width, header = 4, 480, 32
+    first = cv2.imread(str(sources[0]), cv2.IMREAD_COLOR)
+    if first is None:
+        raise ValueError(f'Cannot read QA preview: {sources[0].name}')
+    height = min(320, max(80, round(first.shape[0]*width/first.shape[1])))
+    rows = (len(indices)+columns-1)//columns
+    panel = np.full((rows*(height+header), columns*width, 3), 24, dtype='uint8')
+    for position, (index, source) in enumerate(zip(indices, sources)):
+        preview = first if position == 0 else cv2.imread(str(source), cv2.IMREAD_COLOR)
+        if preview is None:
+            raise ValueError(f'Cannot read QA preview: {source.name}')
+        scale = min(width/preview.shape[1], height/preview.shape[0])
+        thumb = cv2.resize(preview, (max(1, round(preview.shape[1]*scale)),
+                                    max(1, round(preview.shape[0]*scale))), interpolation=cv2.INTER_AREA)
+        y, x = (position//columns)*(height+header), (position%columns)*width
+        cv2.putText(panel, f'Frame {index}', (x+10, y+23), cv2.FONT_HERSHEY_SIMPLEX,
+                    .65, (255, 255, 255), 1, cv2.LINE_AA)
+        top, left = y+header+(height-thumb.shape[0])//2, x+(width-thumb.shape[1])//2
+        panel[top:top+thumb.shape[0], left:left+thumb.shape[1]] = thumb
+    temporary = directory/f'.qa_contact_sheet.{uuid.uuid4().hex}.partial.png'
+    try:
+        write_png(temporary, panel)
+        temporary.replace(sheet)
+        write_json(cache, signature)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return sheet
+
+
 def analyze(video, directory, top_k=8, random_check_frames=4, extra_preview_frames=()):
     """Read one frame at a time; PNG alpha is the sole mask source."""
     directory = Path(directory)
@@ -300,6 +347,7 @@ def analyze(video, directory, top_k=8, random_check_frames=4, extra_preview_fram
         cv2.putText(panel,f'frame {index} | original / overlay | score {rows[index]["anomaly_score"]:.3f}',
                     (8,24),cv2.FONT_HERSHEY_SIMPLEX,.5,(255,255,255),1)
         write_png(directory/'previews'/f'{index:08d}.png',panel)
+    ensure_qa_contact_sheet(directory, chosen)
     report = dict(frame_count=len(rows), frames=rows,
                   anomaly_frames=[r for r in rows if r['reasons']],
                   numerical_passed=not any(r['reasons'] for r in rows),

@@ -15,7 +15,7 @@ import traceback
 import uuid
 
 from sam3_http_files import DEFAULT_MAX_UPLOAD_BYTES, download_reference, register_file_routes
-from sam3_mcp_pipeline import SAM3Backend, analyze, video_frame_count, write_json
+from sam3_mcp_pipeline import SAM3Backend, analyze, ensure_qa_contact_sheet, video_frame_count, write_json
 
 LOG = logging.getLogger('sam3-mcp')
 
@@ -30,6 +30,7 @@ class Service:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sam3-gpu')
         self.package_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='sam3-package')
         self.package_tasks = {}
+        self.preview_locks = {}
         self.jobs = {}
         for path in self.root.rglob('job.json'):
             try:
@@ -76,8 +77,9 @@ class Service:
     def result(self, job_id):
         with self.lock:
             result = copy.deepcopy(self.get(job_id))
-        result['next_step'] = ('Call get_preview for every preview frame, then submit_visual_review; '
-                               'if rejected, call rerun_segmentation with corrected parameters.')
+        result['next_step'] = ('Call get_preview for every preview frame to register retrieval. HTTP-download '
+                               'and inspect the contact_sheet first, then individual previews for suspicious '
+                               'or unclear frames; submit_visual_review after inspection. Never embed image base64.')
         if result['status'] == 'awaiting_keyframe_review':
             result['next_step'] = ('Call get_keyframe_preview for every pending keyframe. HTTP-download the preferred '
                                    'panel to Mac /tmp, visually inspect the local image, then submit_keyframe_review. '
@@ -106,6 +108,9 @@ class Service:
                     analysis=(attempt_dir/'analysis.json').relative_to(self.root).as_posix(),
                     previews={str(frame): (attempt_dir/'previews'/f'{frame:08d}.png').relative_to(self.root).as_posix()
                               for frame in attempt.get('preview_frames', [])})
+                sheet = attempt_dir/'qa_contact_sheet.png'
+                if sheet.is_file():
+                    outputs['contact_sheet'] = sheet.relative_to(self.root).as_posix()
         return outputs
 
     @staticmethod
@@ -135,7 +140,7 @@ class Service:
         with self.lock:
             job = copy.deepcopy(self.get(job_id))
         outputs = self.output_paths(job)
-        files = [outputs[key] for key in ('job_json','validation_video','analysis')
+        files = [outputs[key] for key in ('job_json','validation_video','analysis','contact_sheet')
                  if outputs.get(key) and (self.root/outputs[key]).is_file()]
         files += [relative for relative in outputs.get('previews',{}).values()
                   if (self.root/relative).is_file()]
@@ -345,6 +350,36 @@ class Service:
                 job.update(status='failed', error=attempt['error'], traceback=attempt['traceback'])
                 self.save(job)
 
+    def preview(self, job_id, attempt_index, frame):
+        with self.lock:
+            job = self.get(job_id)
+            attempt = job['attempts'][attempt_index]
+            if frame not in attempt.get('preview_frames', []):
+                raise ValueError('Frame is not a generated preview')
+            directory = Path(attempt['directory'])
+            source = directory/'previews'/f'{frame:08d}.png'
+            if not source.is_file():
+                raise ValueError('Preview file is missing')
+            preview_frames = list(attempt['preview_frames'])
+            sheet_lock = self.preview_locks.setdefault((job_id, attempt_index), threading.Lock())
+        # Old attempts need only this derived image, never segmentation or video QA again.
+        # Keep image I/O outside the service lock so other jobs can still be polled.
+        with sheet_lock:
+            sheet = ensure_qa_contact_sheet(directory, preview_frames)
+        relative, url = download_reference(self.root, source)
+        sheet_relative, sheet_url = download_reference(self.root, sheet)
+        with self.lock:
+            attempt['viewed_frames'] = sorted(set(attempt['viewed_frames']) | {frame})
+            self.save(job)
+        return dict(job_id=job_id, attempt_index=attempt_index, frame=frame,
+                    path=relative, download_url=url, mime_type='image/png',
+                    contact_sheet=dict(path=sheet_relative, download_url=sheet_url, mime_type='image/png',
+                                       frames=preview_frames),
+                    next_step='HTTP-download contact_sheet to Mac /tmp and inspect it locally first; '
+                              'download individual previews for suspicious or unclear frames. Call get_preview '
+                              'for every preview frame before submit_visual_review; this call marks only the '
+                              'requested frame viewed. Do not put image base64 in MCP JSON.')
+
     def keyframe_preview(self, job_id, attempt_index, frame):
         with self.lock:
             job = self.get(job_id)
@@ -493,7 +528,7 @@ class Service:
 
 
 def build_server(args):
-    from mcp.server.fastmcp import FastMCP, Image
+    from mcp.server.fastmcp import FastMCP
     from mcp.server.transport_security import TransportSecuritySettings
     service = None
 
@@ -588,17 +623,15 @@ def build_server(args):
         return service.review_keyframe(job_id, attempt_index, frame, passed, notes)
 
     @mcp.tool()
-    def get_preview(job_id: str, attempt_index: int, frame: int) -> Image:
-        """Return an actual MCP image for Codex visual inspection, not an Ubuntu-only path."""
-        with service.lock:
-            job = service.get(job_id)
-            attempt = job['attempts'][attempt_index]
-            if frame not in attempt.get('preview_frames',[]):
-                raise ValueError('Frame is not a generated preview')
-            data = (Path(attempt['directory'])/'previews'/f'{frame:08d}.png').read_bytes()
-            attempt['viewed_frames'] = sorted(set(attempt['viewed_frames']) | {frame})
-            service.save(job)
-        return Image(data=data,format='png')
+    def get_preview(job_id: str, attempt_index: int, frame: int) -> dict:
+        """Return small JSON file references, never MCP Image/base64. Marks this frame viewed as before.
+        Prefer the contact_sheet containing all QA previews (frame labels, 4 columns, 1920px wide).
+        Resolve /download URLs against this server's origin, HTTP-download to Mac /tmp and visually
+        inspect the local sheet; download individual high-resolution previews only for suspicious
+        or unclear frames. Still call get_preview for EVERY preview frame to register retrieval
+        before submit_visual_review. Existing attempts reuse PNGs without rerunning segmentation.
+        """
+        return service.preview(job_id, attempt_index, frame)
 
     @mcp.tool()
     def submit_visual_review(job_id: str, attempt_index: int, passed: bool,

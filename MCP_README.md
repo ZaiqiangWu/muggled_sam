@@ -97,7 +97,13 @@ curl --fail --show-error \
 
 全部 keyframe 通过后，继续轮询 `get_job_status({"job_id":"JOB"})`，间隔数秒查询：`status` 为 `queued/running/completed/failed`，`running` 时返回 `processed_frames`/`total_frames`/`progress`（0..1，尽力而为：总帧数来自容器元数据、可能为 null，完成时改用精确帧数）。失败时返回带类型的 `error` 和完整 `traceback`。完成后调用 `get_job_result({"job_id":"JOB"})` 获取全部产物路径（work-root 相对，可直接拼 `/download/<path>`），再调用 `get_segmentation({"job_id":"JOB"})` 查看各次尝试配置、异常帧与分数及重试历史。每一帧的完整指标位于 `analysis.json`。
 
-3. 对本次 attempt 的每个 `preview_frames` 调用 `get_preview({"job_id":"JOB","attempt_index":0,"frame":42})`。返回真实 MCP image，左边原图、右边 overlay，不要求 Mac 读取 Ubuntu 路径。检查衣服遗漏、皮肤/头发/背景误分、身份漂移、消失和边界；必要时下载并查看完整 MP4。服务要求所有预览都已取回，视觉结论仍由 Codex 负责，不能用数值通过代替视觉审核。
+3. 对本次 attempt 的每个 `preview_frames` 调用 `get_preview({"job_id":"JOB","attempt_index":0,"frame":42})`。工具仅返回小 JSON：`job_id`、`attempt_index`、`frame`、work-root-relative `path`、`download_url`、`mime_type="image/png"`，以及包含 `path`、`download_url`、`mime_type` 和全部帧号的 `contact_sheet`。不返回 MCP Image 或 base64。
+
+优先通过现有 `/download/...` HTTP 接口将 `contact_sheet.download_url` 下载到 Mac `/tmp`，用本地视觉工具查看。总览图为 `<attempt>/qa_contact_sheet.png`，每行 4 格、宽 1920 px，每格保留原 preview 的 original/overlay 并标注 frame number；只有可疑帧或缩略图看不清的帧，再按单图 `download_url` 下载高清 preview。检查遗漏、皮肤/头发/背景误分、身份漂移、消失和边界；必要时下载完整 MP4。
+
+**viewed 状态机保持不变**：每次 `get_preview` 返回文件引用时，仅将请求的 frame 加入 `viewed_frames`；返回总览图不会自动标记所有帧。必须对每个 `preview_frames` 调用一次这个小 JSON 工具，才可提交 `submit_visual_review`。工具只记录引用已取回，实际 HTTP 下载与视觉检查由调用方负责；`inspected_frames` 仍须覆盖所有预览帧。
+
+新任务在 QA 结束时生成 contact sheet；已有 attempt 缺少时，首次 `get_preview` 只读取已有 `previews/*.png` 拼图，之后按源文件变化缓存复用，不重新运行 SAM3 或全视频 QA。例如已有 job `80f59ecde3e94ff3aaf8e31a06f1c7ae` 的 attempt `2`，服务加载新代码后直接调用 `get_preview` 即可复用原预览并生成总览图。
 
 4. 若有问题，提交：
 
@@ -149,4 +155,4 @@ python -m unittest discover -s tests -v
 
 测试使用合成视频和替代 predictor 验证产物、QA、局部保留、重试/审核门槛、MCP tool 注册以及 HTTP 上传/下载/打包数据面。真实 SAM3 精度、CUDA 显存、大文件 HTTP 传输须在部署环境验证。
 
-已在独立临时环境通过 CPU 测试（Python 3.13、MCP 1.30.0、OpenCV 4.13），包括 Streamable HTTP 握手、MCP image 响应、归档内容、异步 job 状态/进度/失败 traceback/重启恢复，以及 /upload、/download（Range/越界/404）、/files/info 与 `package_result` 的 HTTP 下载对接。部署目标仍按原工程使用 Python 3.12；未执行真实 GPU/权重推理或跨机器大文件 HTTP 实传。运行任务期间请保持输入视频不变。
+已在独立临时环境通过 CPU 测试（Python 3.13、MCP 1.30.0、OpenCV 4.13），包括 Streamable HTTP 握手、MCP JSON 文件引用响应、归档内容、异步 job 状态/进度/失败 traceback/重启恢复，以及 /upload、/download（Range/越界/404）、/files/info 与 `package_result` 的 HTTP 下载对接。部署目标仍按原工程使用 Python 3.12；未执行真实 GPU/权重推理或跨机器大文件 HTTP 实传。运行任务期间请保持输入视频不变。
