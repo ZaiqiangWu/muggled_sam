@@ -72,12 +72,28 @@ curl --fail --show-error \
 
 ```text
 get_keyframe_preview({"job_id":"JOB","attempt_index":0,"frame":0})
+# 先按返回地址 HTTP 下载图片到 Mac /tmp，并查看本地图片，再提交审核：
 submit_keyframe_review({"job_id":"JOB","attempt_index":0,"frame":0,"passed":true,"notes":"已查看原图与 overlay，目标身份、覆盖范围和边界正确，无背景误分"})
 ```
 
+`get_keyframe_preview` 仅返回 JSON 文件信息，不返回 MCP Image、图片字节或 base64。`preferred_preview` 优先指向该帧的 comparison panel；`comparison_panel` 为 panel 文件信息，`candidates` 列出最多四个可选候选（置信度排序 rank 0..3）的 `frame`、`candidate_rank`、`score`、`selected`、work-root-relative `path` 和 `download_url`。`selected_candidate_rank` 表示本次审核对应的候选；查看其他候选不会改变所选 mask，要换候选仍需拒绝并重试。
+
+新预览保存在 `<attempt>/keyframe_previews/frame_00000000_candidate_0.png`，对比图为 `frame_00000000_comparison.png`。每格显示 original/overlay、rank、score，并标出 SELECTED；四个候选采用 2×2 排列，panel 宽度不超过 1920 px。少于四个时仅返回实际可选候选。旧待审核任务可返回已有 `keyframes/00000000.png`，此时 `comparison_panel=null`，不会为了补图重新运行检测。
+
+`download_url` 是相对于 MCP 服务 origin 的 `/download/...` 地址，复用现有下载接口。例如在 Mac 执行（替换服务器、JOB、attempt 和文件名）：
+
+```sh
+preview_dir=$(mktemp -d /tmp/sam3-keyframe.XXXXXX)
+curl --fail --show-error \
+  -o "$preview_dir/frame_00000000_comparison.png" \
+  "http://100.120.152.79:8765/download/JOB/attempt_00/keyframe_previews/frame_00000000_comparison.png"
+```
+
+然后用视觉工具（如 `view_image`）查看下载后的本地文件；若 panel 中细节不够，再下载所选 candidate 单图。不要读取图片后转为 base64 放进 MCP JSON。获取元数据只记录预览地址已取回，服务不能据此确认客户端下载或实际看过图片；调用方必须完成本地视觉检查并在审核 notes 中说明结论。
+
 必须实际查看每个 keyframe 的原图/overlay，再提交判断；不能依据置信度自动通过。未取回预览、空 notes、重复审核或旧 attempt 审核都会被拒绝。全部通过后才开始 tracking，并直接读取已审核的候选 mask，不重新检测。任何一个拒绝（`passed=false`，notes 说明原因）都会停止本次尝试，进入 `needs_retry` 或 `retry_exhausted`；可用 `rerun_segmentation` 修改文本、候选排名或关键帧，重试仍须重新审核所有 keyframe。首次 keyframe 被拒绝时尚无完整结果可供打包。
 
-候选及审核状态保存在 attempt 的 `keyframes/` 和 `job.json` 中。等待期间释放 GPU worker，其他任务可继续执行；重启后可继续完成等待中的审核。这里的“确认正确”由查看图像的调用方（Codex）负责，服务强制执行审核门槛，不以数值指标代替语义判断。
+候选 mask 保存在 attempt 的 `keyframes/`，预览在 `keyframe_previews/`，候选元数据与审核状态在 `job.json` 中。等待期间释放 GPU worker，其他任务可继续执行；重启后可继续完成等待中的审核。这里的“确认正确”由查看图像的调用方（Codex）负责，服务强制执行审核门槛，不以数值指标代替语义判断。
 
 全部 keyframe 通过后，继续轮询 `get_job_status({"job_id":"JOB"})`，间隔数秒查询：`status` 为 `queued/running/completed/failed`，`running` 时返回 `processed_frames`/`total_frames`/`progress`（0..1，尽力而为：总帧数来自容器元数据、可能为 null，完成时改用精确帧数）。失败时返回带类型的 `error` 和完整 `traceback`。完成后调用 `get_job_result({"job_id":"JOB"})` 获取全部产物路径（work-root 相对，可直接拼 `/download/<path>`），再调用 `get_segmentation({"job_id":"JOB"})` 查看各次尝试配置、异常帧与分数及重试历史。每一帧的完整指标位于 `analysis.json`。
 

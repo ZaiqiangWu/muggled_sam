@@ -77,8 +77,9 @@ class Service:
         result['next_step'] = ('Call get_preview for every preview frame, then submit_visual_review; '
                                'if rejected, call rerun_segmentation with corrected parameters.')
         if result['status'] == 'awaiting_keyframe_review':
-            result['next_step'] = ('Call get_keyframe_preview then submit_keyframe_review for every keyframe '
-                                   'in the latest attempt. Tracking starts only after all pass.')
+            result['next_step'] = ('Call get_keyframe_preview for every pending keyframe. HTTP-download the preferred '
+                                   'panel to Mac /tmp, visually inspect the local image, then submit_keyframe_review. '
+                                   'Tracking starts only after all pass. Never put image base64 in MCP JSON.')
         elif result['status'] in ('queued', 'running'):
             result['next_step'] = ('Poll get_job_status; awaiting_keyframe_review requires get_keyframe_preview '
                                    'and submit_keyframe_review for every pending keyframe.')
@@ -310,10 +311,33 @@ class Service:
         with self.lock:
             job = self.get(job_id)
             attempt, keyframe = self.pending_keyframe(job, attempt_index, frame)
-            data = (Path(attempt['directory'])/'keyframes'/f'{frame:08d}.png').read_bytes()
+            directory = Path(attempt['directory'])
+            def reference(path):
+                target = directory/path
+                if not target.is_file():
+                    raise ValueError('Keyframe preview file is missing')
+                relative, url = download_reference(self.root, target)
+                return dict(path=relative, download_url=url)
+            candidates = keyframe.get('candidates')
+            if candidates is None:
+                # Existing pending jobs only have the selected preview; do not rerun detection.
+                candidates = [dict(frame=frame, candidate_rank=attempt['config']['candidate_rank'],
+                                   score=keyframe.get('confidence'), selected=True,
+                                   path=f'keyframes/{frame:08d}.png')]
+            records = [dict(candidate, **reference(candidate['path'])) for candidate in candidates]
+            panel = reference(keyframe['comparison_panel']) if keyframe.get('comparison_panel') else None
+            preferred = panel or next(record for record in records if record['selected'])
+            result = dict(job_id=job_id, attempt_index=attempt_index, frame=frame,
+                          selected_candidate_rank=attempt['config']['candidate_rank'],
+                          preferred_preview=dict(path=preferred['path'], download_url=preferred['download_url']),
+                          comparison_panel=panel, candidates=records,
+                          next_step='Resolve download_url against the MCP server origin; HTTP-download the panel '
+                                    '(or selected candidate) to a unique Mac /tmp path and visually inspect that local '
+                                    'image before submit_keyframe_review. Never embed image base64 in MCP JSON.')
+            # Records metadata retrieval only; actual local visual inspection is the caller's responsibility.
             keyframe['viewed'] = True
             self.save(job)
-            return data
+            return result
 
     @staticmethod
     def pending_keyframe(job, attempt_index, frame):
@@ -503,16 +527,21 @@ def build_server(args):
         return service.job_result(job_id)
 
     @mcp.tool()
-    def get_keyframe_preview(job_id: str, attempt_index: int, frame: int) -> Image:
-        """Inspect the exact candidate BEFORE it enters tracking memory: original left, overlay right.
-        Check target identity, coverage, boundaries and unwanted foreground/background inclusion.
-        Every prompt frame must be inspected, including frame zero and partial retry start.
+    def get_keyframe_preview(job_id: str, attempt_index: int, frame: int) -> dict:
+        """Return preview file metadata and HTTP URLs only, never image bytes/base64.
+        Prefer preferred_preview: a comparison panel of up to four selectable candidates;
+        candidates also lists individual original/overlay images with rank and detector score.
+        Resolve /download URLs against this MCP server's origin, download to a unique Mac /tmp
+        file over HTTP, then visually inspect the local image (e.g. view_image). Do not convert
+        images to base64 in MCP JSON. Check the SELECTED rank's identity, coverage and boundaries
+        before submit_keyframe_review. Every prompt frame must be inspected.
         """
-        return Image(data=service.keyframe_preview(job_id, attempt_index, frame), format='png')
+        return service.keyframe_preview(job_id, attempt_index, frame)
 
     @mcp.tool()
     def submit_keyframe_review(job_id: str, attempt_index: int, frame: int, passed: bool, notes: str) -> dict:
-        """Record visual correctness after get_keyframe_preview; numerical confidence is insufficient.
+        """Record correctness AFTER HTTP-downloading and visually inspecting the local keyframe preview.
+        Fetching metadata alone is not visual inspection; numerical confidence is insufficient.
         All keyframes must pass before tracking starts with these exact masks. Rejecting any
         candidate stops this attempt; call rerun_segmentation with corrected text/rank/frames.
         Explain the visual decision in notes. Final video visual review is still required.

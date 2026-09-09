@@ -92,10 +92,15 @@ class SAM3Backend:
                 if metrics['area'] == 0:
                     raise ValueError(f'Frame {index}: empty full-resolution candidate mask')
                 np.save(directory/f'{index:08d}.npy', selected.cpu().numpy(), allow_pickle=False)
-                panel = np.concatenate([frame, overlay(frame, mask > 0)], axis=1)
-                write_png(directory/f'{index:08d}.png', panel)
+                previews = []
+                for candidate_rank, candidate in enumerate(candidates[:4]):
+                    logits = masks[candidate].float()
+                    candidate_mask = make_hires_mask_uint8(logits, frame.shape[:2])
+                    previews.append(dict(candidate_rank=candidate_rank,
+                                         score=float(scores.flatten()[candidate].item()), mask=candidate_mask > 0))
+                preview_info = write_keyframe_previews(directory.parent, index, frame, previews, rank)
                 results.append(dict(frame=index, confidence=float(scores.flatten()[candidates[rank]].item()),
-                                    metrics=metrics, viewed=False, review=None))
+                                    metrics=metrics, viewed=False, review=None, **preview_info))
                 pending.remove(index)
                 if not pending:
                     break
@@ -194,6 +199,43 @@ def mask_metrics(mask, previous=None):
         1-row['iou'], min(1, row['area_change']/2), min(1, row['centroid_jump']/.2),
         min(1, row['bbox_jump']/.3), min(1, max(0, pieces-3)/10)))
     return row
+
+
+def write_keyframe_previews(attempt_directory, frame_index, frame, candidates, selected_rank):
+    """Write the up-to-four selectable candidates and a bounded comparison panel.
+
+    Returned paths are attempt-relative; HTTP references are resolved by the service.
+    """
+    directory = Path(attempt_directory)/'keyframe_previews'
+    directory.mkdir(parents=True, exist_ok=True)
+    tiles, records = [], []
+    for candidate in candidates:
+        rank, score = candidate['candidate_rank'], candidate.get('score')
+        tile = np.concatenate([frame, overlay(frame, candidate['mask'])], axis=1)
+        if tile.shape[1] > 1920:
+            tile = cv2.resize(tile, (1920, max(1, round(tile.shape[0]*1920/tile.shape[1]))))
+        tile = cv2.copyMakeBorder(tile, 44, 0, 0, 0, cv2.BORDER_CONSTANT)
+        score_label = f'{score:.4f}' if score is not None else 'n/a'
+        label = f'Frame {frame_index} | rank {rank} | score {score_label} | original / overlay'
+        if rank == selected_rank:
+            label += ' | SELECTED'
+        cv2.putText(tile, label, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, .65, (255, 255, 255), 1, cv2.LINE_AA)
+        path = directory/f'frame_{frame_index:08d}_candidate_{rank}.png'
+        write_png(path, tile)
+        records.append(dict(frame=frame_index, candidate_rank=rank, score=score,
+                            selected=rank == selected_rank, path=path.relative_to(attempt_directory).as_posix()))
+        tiles.append(tile)
+    columns = min(2, len(tiles))
+    rows = (len(tiles)+columns-1)//columns
+    tile_width = min(960, tiles[0].shape[1])
+    tile_height = max(1, round(tiles[0].shape[0]*tile_width/tiles[0].shape[1]))
+    panel = np.zeros((rows*tile_height, columns*tile_width, 3), dtype='uint8')
+    for i, tile in enumerate(tiles):
+        y, x = (i//columns)*tile_height, (i%columns)*tile_width
+        panel[y:y+tile_height, x:x+tile_width] = cv2.resize(tile, (tile_width, tile_height))
+    panel_path = directory/f'frame_{frame_index:08d}_comparison.png'
+    write_png(panel_path, panel)
+    return dict(candidates=records, comparison_panel=panel_path.relative_to(attempt_directory).as_posix())
 
 
 def overlay(frame, mask):
