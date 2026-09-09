@@ -14,7 +14,7 @@ pip install -r requirements_my.txt -r requirements_mcp.txt
 mkdir -p sam3-input sam3-output
 python mcp_server.py --weights ./model_weights/sam3.pt \
   --input-root sam3-input \
-  --work-root sam3-output --host 127.0.0.1 --port 8765
+  --work-root sam3-output --host 0.0.0.0 --port 8765
 ```
 
 请在调度器分配的 GPU compute node 内运行，勿占用 login node GPU。默认 CUDA / 项目原有 dtype 配置，可传 `--float32` 或 `--device cpu`；后者极慢。模型与 detector 在启动时加载一次，全部推理由同一个后台线程串行执行；只运行一个服务进程，不要配置多个 Web workers 共用输出目录/GPU。启动需等待权重加载完成。输入根目录可重复指定，输出目录必须是 work root 下的新目录。
