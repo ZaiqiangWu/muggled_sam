@@ -12,6 +12,7 @@ import tarfile
 import threading
 import uuid
 
+from sam3_http_files import DEFAULT_MAX_UPLOAD_BYTES, download_reference, register_file_routes
 from sam3_mcp_pipeline import SAM3Backend, analyze, write_json
 
 LOG = logging.getLogger('sam3-mcp')
@@ -40,24 +41,93 @@ class Service:
             raise ValueError('Unknown job_id')
         return self.jobs[job_id]
 
+    def resolve_video(self, video_path):
+        """Resolve video_path against the configured input roots.
+
+        Accepts the relative path returned by POST /upload (e.g. \"abc123/video.mp4\")
+        or an absolute path inside a --input-root; relative names are resolved against
+        every input root and must exist in exactly one of them.
+        """
+        raw = Path(video_path).expanduser()
+        candidates = [raw] if raw.is_absolute() else [root/raw for root in self.input_roots]
+        resolved = [c for c in (candidate.resolve() for candidate in candidates)
+                    if c.is_file() and any(c.is_relative_to(root) for root in self.input_roots)]
+        if not resolved:
+            raise ValueError('Input must be an existing file under a configured --input-root; '
+                             'upload Mac videos with POST /upload and pass the returned relative path')
+        if len(set(resolved)) > 1:
+            raise ValueError('Relative video_path exists under multiple --input-root entries; use an absolute path')
+        return resolved[0]
+
     def result(self, job_id):
         with self.lock:
             result = copy.deepcopy(self.get(job_id))
         result['next_step'] = ('Call get_preview for every preview frame, then submit_visual_review; '
                                'if rejected, call rerun_segmentation with corrected parameters.')
+        result['outputs'] = self.output_paths(result)
         return result
+
+    def output_paths(self, job):
+        """Work-root-relative artifact paths for this job, usable as GET /download/<path>."""
+        directory = Path(job['directory'])
+        outputs = dict(job_json=(directory/'job.json').relative_to(self.root).as_posix())
+        best = job.get('best_attempt')
+        if best is not None and best < len(job['attempts']):
+            attempt = job['attempts'][best]
+            if 'rgba_dir' in attempt:
+                attempt_dir = Path(attempt['directory'])
+                outputs.update(
+                    rgba_dir=Path(attempt['rgba_dir']).relative_to(self.root).as_posix(),
+                    validation_video=(attempt_dir/'overlay.mp4').relative_to(self.root).as_posix(),
+                    analysis=(attempt_dir/'analysis.json').relative_to(self.root).as_posix(),
+                    previews={str(frame): (attempt_dir/'previews'/f'{frame:08d}.png').relative_to(self.root).as_posix()
+                              for frame in attempt.get('preview_frames', [])})
+        return outputs
+
+    def newest_mtime(self, directory):
+        newest = 0.0
+        for path in Path(directory).rglob('*'):
+            if path.is_file():
+                newest = max(newest, path.stat().st_mtime)
+        return newest
+
+    def package(self, job):
+        """Build <job dir>/result.tar.gz (job.json + best attempt as result/).
+
+        Reuses the archive when every packaged artifact is unchanged; the partial file
+        is dot-prefixed so /download can never serve an unfinished archive.
+        """
+        folder = Path(job['directory'])
+        archive = folder/'result.tar.gz'
+        best_dir = Path(job['attempts'][job['best_attempt']]['directory'])
+        manifest = folder/'job.json'
+        newest = max(self.newest_mtime(best_dir), manifest.stat().st_mtime if manifest.is_file() else 0.0)
+        if archive.is_file() and archive.stat().st_mtime >= newest:
+            return archive
+        temporary = folder/f'.result.tar.gz.{uuid.uuid4().hex}.partial'
+        try:
+            import io
+            with tarfile.open(temporary,'w:gz') as tar:
+                data = json.dumps(job,indent=2,ensure_ascii=False).encode()
+                info = tarfile.TarInfo('job.json')
+                info.size = len(data)
+                tar.addfile(info,io.BytesIO(data))
+                tar.add(best_dir,arcname='result')
+            temporary.replace(archive)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return archive
 
     def submit(self, video_path, text_prompt, output_dir=None, top_k=8, random_check_frames=4,
                max_retry=2, prompt_frames=None, candidate_rank=0, score_threshold=.0,
                max_memories=6, max_pointers=15, object_score_threshold=.0,
                input_location='ubuntu', output_location='ubuntu'):
         if input_location != 'ubuntu':
-            raise ValueError('Upload Mac video with mcp_transfer.py first, then use its Ubuntu path and input_location=ubuntu')
+            raise ValueError('Mac videos must live on the server: POST the file to /upload (or place it '
+                             'under a --input-root), then pass the returned relative path with input_location=ubuntu')
         if output_location not in ('ubuntu','mac'):
             raise ValueError('output_location must be ubuntu or mac')
-        video = Path(video_path).expanduser().resolve()
-        if not any(video.is_relative_to(root) for root in self.input_roots) or not video.is_file():
-            raise ValueError('Input must be an existing file under a configured --input-root')
+        video = self.resolve_video(video_path)
         if not text_prompt.strip() or not 0 <= max_retry <= 10:
             raise ValueError('Nonempty text_prompt and max_retry in 0..10 required')
         config = dict(text_prompt=text_prompt, prompt_frames=sorted(set(prompt_frames or [0])),
@@ -260,8 +330,10 @@ def build_server(args):
         """Start SAM3 -> RGBA -> temporal QA -> overlay/previews. Poll get_segmentation.
 
         Frame indices are zero-based. The first prompt frame must be 0. Candidate rank
-        selects among the top four nonempty detections sorted by confidence. Mac inputs
-        must first be uploaded via SSH/SFTP. output_dir is always Ubuntu staging storage.
+        selects among the top four nonempty detections sorted by confidence. video_path
+        accepts the relative path returned by POST /upload (e.g. "abc123/video.mp4") or
+        an absolute path inside a configured --input-root; never base64-encode videos or
+        transfer them via SSH/SCP/SFTP. output_dir is always Ubuntu staging storage.
         output_location=mac requests an archive for subsequent download, not a Mac path.
         Continue by viewing ALL previews and submitting visual review; never infer visual
         correctness from numerical_passed. Use rerun_segmentation after a rejected review.
@@ -310,29 +382,24 @@ def build_server(args):
 
     @mcp.tool()
     def package_result(job_id: str) -> dict:
-        """Package current best RGBA, MP4, analysis, previews and full history for SFTP download.
-        Can export rejected results after retry exhaustion; check quality_passed in response.
+        """Package current best RGBA, MP4, analysis, previews and full history for HTTP download.
+        Reuses the existing result.tar.gz while its artifacts are unchanged. Can export
+        rejected results after retry exhaustion; check quality_passed in response.
+        download is work-root-relative: fetch it with GET /download/<download>.
         """
         with service.lock:
             job = copy.deepcopy(service.get(job_id))
             if job['status'] in ('queued','running') or job['best_attempt'] is None:
                 raise ValueError('Wait for a completed attempt')
-        folder = Path(job['directory'])
-        archive = folder/f'result_{uuid.uuid4().hex}.tar.gz'
-        temporary = archive.with_suffix('.partial')
-        try:
-            with tarfile.open(temporary,'w:gz') as tar:
-                import io
-                data = json.dumps(job,indent=2,ensure_ascii=False).encode()
-                info = tarfile.TarInfo('job.json')
-                info.size = len(data)
-                tar.addfile(info,io.BytesIO(data))
-                tar.add(job['attempts'][job['best_attempt']]['directory'],arcname='result')
-            temporary.replace(archive)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return dict(archive_path=str(archive),quality_passed=job['quality_passed'],
-                    output_location=job['output_location'],transfer_status='ready_for_sftp_download')
+        archive = service.package(job)
+        relative, url = download_reference(service.root, archive)
+        return dict(archive_path=str(archive), download=relative, download_url=url,
+                    quality_passed=job['quality_passed'], output_location=job['output_location'],
+                    transfer_status='ready_for_http_download')
+
+    # Data plane beside the MCP control plane: /upload -> input-root,
+    # /download and /files/info -> work-root (see sam3_http_files.py).
+    register_file_routes(mcp,args.input_root[0],args.work_root,args.max_upload_bytes)
 
     return mcp
 
@@ -345,6 +412,8 @@ def main():
     parser.add_argument('--port',type=int,default=8765)
     parser.add_argument('--work-root',default='./mcp_jobs')
     parser.add_argument('--input-root',action='append',required=True)
+    parser.add_argument('--max-upload-bytes',type=int,default=DEFAULT_MAX_UPLOAD_BYTES,
+                        help='Largest accepted upload in bytes (default 64 GiB)')
     parser.add_argument('--device',default='cuda')
     parser.add_argument('--base-size',type=int,default=2048)
     parser.add_argument('--float32',action='store_true')
