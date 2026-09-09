@@ -41,7 +41,7 @@ Mac 的 MCP URL 为 `http://100.120.152.79:8765/mcp`，两端需能通过 Tailsc
 大文件走与 MCP 同源的 HTTP 数据面（流式传输，数 GB 级）；**不要** SSH/SCP/SFTP，**不要**把视频 base64 编码进 MCP JSON：
 
 - `POST /upload`：`multipart/form-data` 字段名 `file`，流式写入 `<input-root>/<file_id>/<filename>`（临时文件 + 原子 rename），返回 `{"ok":true,"file_id":"...","filename":"...","size":...,"path":"<file_id>/<filename>","sha256":"..."}`。
-- `GET /download/{path}`：从 work-root 流式下载，支持 `Range` 断点续传，例 `GET /download/JOB/result.tar.gz`。
+- `GET /download/{path}`：从 work-root 流式下载，支持 `Range` 断点续传，例 `GET /download/JOB/result.tar`。
 - `GET /files/info/{path}?root=input|work`：返回 `{"exists":true,"size":...,"filename":"..."}`。
 
 所有路径 canonicalize 后必须仍位于对应 root 内：`/upload` 只能写 input-root，`/download` 只能读 work-root，`/files/info` 可读 work-root（`root=input` 时读 input-root），`../` 越界返回 403。
@@ -115,17 +115,17 @@ curl --fail --show-error \
 
 5. 重复查询、查看新预览、提交审核。通过时 `passed=true, issues=[]`，notes 说明检查结论；若有数值报警但属于合理运动/遮挡，应解释这些报警。达到 `max_retry`（不含首次运行）后不再允许重试，返回 `retry_exhausted`、`quality_passed=false`、当前最佳产物及仍存在的问题。当前最佳优先采用视觉通过版本；未通过时按视觉问题数及平均异常分数排序。这是启发式选择，不是语义正确性保证。
 
-6. 调用 `package_result({"job_id":"JOB"})` 得到 `download`（work-root 相对路径，如 `JOB/result.tar.gz`），然后在 Mac 执行：
+6. 调用 `package_result({"job_id":"JOB"})` 立即返回 `status="packaging"`，每隔数秒重复调用查询，期间不会重复启动同一 job 的打包任务。后台完成后返回 `status="ready"`、`archive_path`、`download_url` 和 `download`（work-root 相对路径，如 `JOB/result.tar`），然后在 Mac 执行：
 
 ```sh
 curl --fail --show-error \
-  -o /Users/ME/Downloads/sam3-result.tar.gz \
-  "http://100.120.152.79:8765/download/JOB/result.tar.gz"
+  -o /Users/ME/Downloads/sam3-result.tar \
+  "http://100.120.152.79:8765/download/JOB/result.tar"
 mkdir /Users/ME/Downloads/sam3-result
-tar -xzf /Users/ME/Downloads/sam3-result.tar.gz -C /Users/ME/Downloads/sam3-result
+tar -xf /Users/ME/Downloads/sam3-result.tar -C /Users/ME/Downloads/sam3-result
 ```
 
-`package_result` 幂等：`result.tar.gz` 仅在产物更新后重建；`-o` 覆盖已有本地文件，需要保留旧结果时先改名。单文件也可用 `/files/info/{path}` 查大小、`/download/{path}` 直接下载（支持 Range 断点续传）。归档包含 `result/rgba/*.png`、`result/overlay.mp4`、`result/analysis.json`、`result/previews/` 和包含完整 retry/review 历史的 `job.json`。Ubuntu 输出无需下载。归档也允许导出未通过结果，返回值明确标出 `quality_passed`。
+`package_result` 使用独立后台线程生成无 gzip 压缩的普通 `.tar`，目录扫描和缓存检查也在后台执行，不占用 GPU 推理队列。返回 `status="failed"` 时包含 `error`；下一次调用可重新尝试。取回 ready/failed 后再次调用会启动新的后台缓存检查：若 `result.tar` 不早于全部待打包 artifact 和 job.json，则直接复用，不重新写 tar；否则重建。临时文件为 `.result.tar.<uuid>.partial`，成功后原子替换 `result.tar`，失败时清理临时文件并保留已有归档。`-o` 覆盖已有本地文件，需要保留旧结果时先改名。单文件也可用 `/files/info/{path}` 查大小、`/download/{path}` 直接下载（支持 Range 断点续传）。归档包含 `result/rgba/*.png`、`result/overlay.mp4`、`result/analysis.json`、`result/previews/` 和包含完整 retry/review 历史的 `job.json`。Ubuntu 输出无需下载。归档也允许导出未通过结果，返回值明确标出 `quality_passed`。
 
 ## QA、故障与限制
 

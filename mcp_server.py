@@ -28,6 +28,8 @@ class Service:
         self.input_roots = [Path(p).resolve() for p in input_roots]
         self.lock = threading.RLock()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sam3-gpu')
+        self.package_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='sam3-package')
+        self.package_tasks = {}
         self.jobs = {}
         for path in self.root.rglob('job.json'):
             try:
@@ -137,7 +139,7 @@ class Service:
                  if outputs.get(key) and (self.root/outputs[key]).is_file()]
         files += [relative for relative in outputs.get('previews',{}).values()
                   if (self.root/relative).is_file()]
-        archive = (Path(job['directory'])/'result.tar.gz').relative_to(self.root).as_posix()
+        archive = (Path(job['directory'])/'result.tar').relative_to(self.root).as_posix()
         if (self.root/archive).is_file():
             files.append(archive)
         rgba_count = None
@@ -156,32 +158,68 @@ class Service:
                 newest = max(newest, path.stat().st_mtime)
         return newest
 
-    def package(self, job):
-        """Build <job dir>/result.tar.gz (job.json + best attempt as result/).
+    def package(self, job, manifest_version=None):
+        """Build <job dir>/result.tar (job.json + best attempt as result/) on a worker.
 
         Reuses the archive when every packaged artifact is unchanged; the partial file
         is dot-prefixed so /download can never serve an unfinished archive.
         """
         folder = Path(job['directory'])
-        archive = folder/'result.tar.gz'
+        archive = folder/'result.tar'
         best_dir = Path(job['attempts'][job['best_attempt']]['directory'])
         manifest = folder/'job.json'
+        def check_manifest():
+            if manifest_version is not None and manifest.stat().st_mtime_ns != manifest_version:
+                raise RuntimeError('Job changed during packaging; request package_result again for the current result')
+        check_manifest()
         newest = max(self.newest_mtime(best_dir), manifest.stat().st_mtime if manifest.is_file() else 0.0)
         if archive.is_file() and archive.stat().st_mtime >= newest:
+            check_manifest()
             return archive
-        temporary = folder/f'.result.tar.gz.{uuid.uuid4().hex}.partial'
+        temporary = folder/f'.result.tar.{uuid.uuid4().hex}.partial'
         try:
             import io
-            with tarfile.open(temporary,'w:gz') as tar:
+            with tarfile.open(temporary,'w') as tar:
                 data = json.dumps(job,indent=2,ensure_ascii=False).encode()
                 info = tarfile.TarInfo('job.json')
                 info.size = len(data)
                 tar.addfile(info,io.BytesIO(data))
                 tar.add(best_dir,arcname='result')
+            check_manifest()
             temporary.replace(archive)
         finally:
             temporary.unlink(missing_ok=True)
         return archive
+
+    def package_result(self, job_id):
+        """Start/poll one background task per job, including the recursive cache check.
+
+        A terminal response consumes the task; a subsequent request checks the cache
+        again in the background so changed artifacts are detected without blocking MCP.
+        """
+        with self.lock:
+            job = self.get(job_id)
+            task = self.package_tasks.get(job_id)
+            if task is None:
+                if job['status'] in ('queued', 'running', 'awaiting_keyframe_review') or job['best_attempt'] is None:
+                    raise ValueError('Wait for a completed attempt')
+                snapshot = copy.deepcopy(job)
+                version = (Path(job['directory'])/'job.json').stat().st_mtime_ns
+                self.package_tasks[job_id] = (self.package_executor.submit(self.package, snapshot, version), snapshot)
+                return dict(job_id=job_id, status='packaging')
+            future, snapshot = task
+            if not future.done():
+                return dict(job_id=job_id, status='packaging')
+            del self.package_tasks[job_id]
+            try:
+                archive = future.result()
+                relative, url = download_reference(self.root, archive)
+            except Exception as exc:
+                return dict(job_id=job_id, status='failed', error=f'{type(exc).__name__}: {exc}')
+            return dict(job_id=job_id, status='ready', archive_path=str(archive),
+                        download=relative, download_url=url,
+                        quality_passed=snapshot['quality_passed'], output_location=snapshot['output_location'],
+                        transfer_status='ready_for_http_download')
 
     def submit(self, video_path, text_prompt, output_dir=None, top_k=8, random_check_frames=4,
                max_retry=2, prompt_frames=None, candidate_rank=0, score_threshold=.0,
@@ -470,6 +508,7 @@ def build_server(args):
             yield {}
         finally:
             service.executor.shutdown(wait=True)
+            service.package_executor.shutdown(wait=True)
 
     # Accept any HTTP Host/Origin; network access is controlled outside MCP.
     security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
@@ -583,20 +622,14 @@ def build_server(args):
 
     @mcp.tool()
     def package_result(job_id: str) -> dict:
-        """Package current best RGBA, MP4, analysis, previews and full history for HTTP download.
-        Reuses the existing result.tar.gz while its artifacts are unchanged. Can export
-        rejected results after retry exhaustion; check quality_passed in response.
-        download is work-root-relative: fetch it with GET /download/<download>.
+        """Start/poll background uncompressed result.tar packaging; never wait for file traversal or tar writes.
+        First call returns status=packaging; poll every few seconds until ready (archive_path,
+        download, download_url) or failed (error). Only one package task per job runs at a time.
+        After a terminal result, a new call starts a background cache check: unchanged artifacts
+        reuse result.tar. Can export rejected results; check quality_passed in the ready response.
+        Download over the existing /download HTTP route; no image/video base64 in MCP JSON.
         """
-        with service.lock:
-            job = copy.deepcopy(service.get(job_id))
-            if job['status'] in ('queued','running','awaiting_keyframe_review') or job['best_attempt'] is None:
-                raise ValueError('Wait for a completed attempt')
-        archive = service.package(job)
-        relative, url = download_reference(service.root, archive)
-        return dict(archive_path=str(archive), download=relative, download_url=url,
-                    quality_passed=job['quality_passed'], output_location=job['output_location'],
-                    transfer_status='ready_for_http_download')
+        return service.package_result(job_id)
 
     # Data plane beside the MCP control plane: /upload -> input-root,
     # /download and /files/info -> work-root (see sam3_http_files.py).
