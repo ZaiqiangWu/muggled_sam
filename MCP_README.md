@@ -40,10 +40,9 @@ python mcp_server.py --weights ./model_weights/sam3.pt \
 ```
 
 Mac 的 MCP URL 改为 `http://100.120.152.79:8765/mcp`，两端需能通过 Tailscale 互访。
-如需监听所有 IPv4 网卡，使用 `--host 0.0.0.0 --allowed-host 100.120.152.79:8765`。
-绑定具体地址会自动将该地址及端口加入 HTTP Host/Origin 白名单；使用别名访问时可重复
-`--allowed-host sam3-host:8765` 添加白名单。默认保留 DNS rebinding 检查。
-白名单不是身份认证；直连部署应通过 Tailscale ACL 或防火墙将端口限制给可信客户端。
+如需监听所有 IPv4 网卡，使用 `--host 0.0.0.0`，无需额外参数。
+服务接受任意 HTTP Host/Origin，已关闭 DNS rebinding 检查，并移除 `--allowed-host` 参数。
+默认监听地址仍为 `127.0.0.1`；直连部署的访问范围由 Tailscale ACL 或防火墙控制。
 
 将 [examples/codex_mcp.toml](examples/codex_mcp.toml) 合并到 Mac 的 `~/.codex/config.toml`。配置依据 [Codex 官方 MCP 文档](https://developers.openai.com/codex/mcp)；服务使用 [官方 Python MCP SDK v1](https://github.com/modelcontextprotocol/python-sdk/tree/v1.x) 的 Streamable HTTP。依赖限制 `<2`，避免 v2 接口变化。
 

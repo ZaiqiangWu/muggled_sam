@@ -245,18 +245,8 @@ def build_server(args):
         finally:
             service.executor.shutdown(wait=True)
 
-    # Binding an interface and accepting a HTTP Host are separate settings.
-    # Wildcard bind addresses are not client-facing addresses.
-    hosts = {'127.0.0.1:*', 'localhost:*', '[::1]:*'}
-    if args.host not in ('0.0.0.0', '::'):
-        hostname = f'[{args.host}]' if ':' in args.host else args.host
-        hosts.add(f'{hostname}:{args.port}')
-    hosts.update(getattr(args, 'allowed_host', None) or [])
-    security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=sorted(hosts),
-        allowed_origins=sorted(f'{scheme}://{host}' for host in hosts for scheme in ('http', 'https')),
-    )
+    # Accept any HTTP Host/Origin; network access is controlled outside MCP.
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     mcp = FastMCP('SAM3 video segmentation',host=args.host,port=args.port,lifespan=lifespan,
                   transport_security=security)
 
@@ -352,9 +342,6 @@ def main():
     parser.add_argument('--weights',default='model_weights/sam3.pt')
     parser.add_argument('--host',default='127.0.0.1',
                         help='Bind address: loopback by default; use a Tailscale/LAN IP for direct access')
-    parser.add_argument('--allowed-host',action='append',default=[],
-                        help='Additional HTTP Host, e.g. 100.120.152.79:8765; repeat for aliases. '
-                             'Required for remote access when binding 0.0.0.0 or ::')
     parser.add_argument('--port',type=int,default=8765)
     parser.add_argument('--work-root',default='./mcp_jobs')
     parser.add_argument('--input-root',action='append',required=True)
