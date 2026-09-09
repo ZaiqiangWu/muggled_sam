@@ -1,6 +1,6 @@
 # SAM3 远程 MCP 服务
 
-工作流：`Mac/Ubuntu video → MCP → SAM3 → RGBA masks → anomaly detection → preview → Codex visual inspection → optional retry → RGBA PNG + validation MP4`。
+工作流：`Mac/Ubuntu video → MCP → SAM3 keyframe 候选 → 逐帧视觉审核 → tracking → RGBA masks → anomaly detection → preview → Codex visual inspection → optional retry → RGBA PNG + validation MP4`。
 
 本实现复用 `my_readme.md` 对应代码中的 `make_sam_from_state_dict`、`make_detector_model`、`initialize_from_mask`、`SAMVideoObjectResults`、`step_video_masking` 和 `make_hires_mask_uint8`。不调用会创建 UI 的顶层脚本，不加载外部 prompt pickle。单个文本目标；同一文本匹配多个对象时，通过置信度排序的 `candidate_rank=0..3` 选择实例，然后必须目视确认身份。默认使用与交互脚本相同的非空候选过滤和 2048 square encoding。
 
@@ -68,7 +68,18 @@ curl --fail --show-error \
 {"video_path":"UPLOADED_FILE_ID/input.mp4","text_prompt":"quilted jacket","output_location":"mac","top_k":8,"random_check_frames":4,"max_retry":2,"prompt_frames":[0],"candidate_rank":0}
 ```
 
-2. 轮询 `get_job_status({"job_id":"JOB"})`，间隔数秒查询：`status` 为 `queued/running/completed/failed`，`running` 时返回 `processed_frames`/`total_frames`/`progress`（0..1，尽力而为：总帧数来自容器元数据、可能为 null，完成时改用精确帧数）。失败时返回带类型的 `error` 和完整 `traceback`。完成后调用 `get_job_result({"job_id":"JOB"})` 获取全部产物路径（work-root 相对，可直接拼 `/download/<path>`），再调用 `get_segmentation({"job_id":"JOB"})` 查看各次尝试配置、异常帧与分数及重试历史。每一帧的完整指标位于 `analysis.json`。
+2. 先审核全部 keyframe：轮询 `get_job_status`，当 `internal_status="awaiting_keyframe_review"`（对外 `status="running"`）时，按 `pending_keyframes` 逐帧调用下面两个工具。`attempt_index` 使用当前 attempt 的序号，可从 `get_job_status.attempt` 或 `get_segmentation` 获取。
+
+```text
+get_keyframe_preview({"job_id":"JOB","attempt_index":0,"frame":0})
+submit_keyframe_review({"job_id":"JOB","attempt_index":0,"frame":0,"passed":true,"notes":"已查看原图与 overlay，目标身份、覆盖范围和边界正确，无背景误分"})
+```
+
+必须实际查看每个 keyframe 的原图/overlay，再提交判断；不能依据置信度自动通过。未取回预览、空 notes、重复审核或旧 attempt 审核都会被拒绝。全部通过后才开始 tracking，并直接读取已审核的候选 mask，不重新检测。任何一个拒绝（`passed=false`，notes 说明原因）都会停止本次尝试，进入 `needs_retry` 或 `retry_exhausted`；可用 `rerun_segmentation` 修改文本、候选排名或关键帧，重试仍须重新审核所有 keyframe。首次 keyframe 被拒绝时尚无完整结果可供打包。
+
+候选及审核状态保存在 attempt 的 `keyframes/` 和 `job.json` 中。等待期间释放 GPU worker，其他任务可继续执行；重启后可继续完成等待中的审核。这里的“确认正确”由查看图像的调用方（Codex）负责，服务强制执行审核门槛，不以数值指标代替语义判断。
+
+全部 keyframe 通过后，继续轮询 `get_job_status({"job_id":"JOB"})`，间隔数秒查询：`status` 为 `queued/running/completed/failed`，`running` 时返回 `processed_frames`/`total_frames`/`progress`（0..1，尽力而为：总帧数来自容器元数据、可能为 null，完成时改用精确帧数）。失败时返回带类型的 `error` 和完整 `traceback`。完成后调用 `get_job_result({"job_id":"JOB"})` 获取全部产物路径（work-root 相对，可直接拼 `/download/<path>`），再调用 `get_segmentation({"job_id":"JOB"})` 查看各次尝试配置、异常帧与分数及重试历史。每一帧的完整指标位于 `analysis.json`。
 
 3. 对本次 attempt 的每个 `preview_frames` 调用 `get_preview({"job_id":"JOB","attempt_index":0,"frame":42})`。返回真实 MCP image，左边原图、右边 overlay，不要求 Mac 读取 Ubuntu 路径。检查衣服遗漏、皮肤/头发/背景误分、身份漂移、消失和边界；必要时下载并查看完整 MP4。服务要求所有预览都已取回，视觉结论仍由 Codex 负责，不能用数值通过代替视觉审核。
 
@@ -102,9 +113,9 @@ tar -xzf /Users/ME/Downloads/sam3-result.tar.gz -C /Users/ME/Downloads/sam3-resu
 
 ## QA、故障与限制
 
-数值指标逐帧计算：相邻 mask IoU、相对面积变化、centroid 和 bbox 跳变（归一化到图像对角线）、消失、扩张和碎片数；阈值和分数组合见 `mask_metrics`。预览包含分数最高 top_k、固定随机种子抽取的正常帧、首尾帧和局部重跑接缝。任何版本在视觉审核前 `quality_passed=false`；正常帧不足时仅选择实际可用的正常帧。抽样视觉审核无法保证未查看帧全部正确。
+数值指标逐帧计算：相邻 mask IoU、相对面积变化、centroid 和 bbox 跳变（归一化到图像对角线）、消失、扩张和碎片数；阈值和分数组合见 `mask_metrics`。最终视频预览包含分数最高 top_k、固定随机种子抽取的正常帧、首尾帧、所有 keyframe 和局部重跑接缝。任何版本在视觉审核前 `quality_passed=false`；正常帧不足时仅选择实际可用的正常帧。抽样视觉审核无法保证未查看帧全部正确。
 
-权重加载错误会阻止启动；任务错误有 traceback 日志以及带类型的 error 字段，失败输出不参与最佳选择。每个任务和 attempt 独立，输出不静默覆盖；中断重启后任务标为 failed，可在剩余预算内重试。损坏的 job.json 会在启动时被跳过并告警，不会导致服务启动失败；单个任务失败只写回该任务的 job.json，不影响服务进程和其余任务。成功版本保留用于比较/下载，不自动删除用户产物；失败的 RGBA 和临时打包/下载文件会清理。磁盘需求随帧数和重试次数增长，完成后由用户清理任务目录。服务通过 Tailscale 私有网络暴露给单用户可信 Mac，HTTP 层无账号认证。
+权重加载错误会阻止启动；任务错误有 traceback 日志以及带类型的 error 字段，失败输出不参与最佳选择。每个任务和 attempt 独立，输出不静默覆盖；推理中断重启后任务标为 failed（等待 keyframe 审核的任务保留审核状态），可在剩余预算内重试。损坏的 job.json 会在启动时被跳过并告警，不会导致服务启动失败；单个任务失败只写回该任务的 job.json，不影响服务进程和其余任务。成功版本保留用于比较/下载，不自动删除用户产物；失败的 RGBA 和临时打包/下载文件会清理。磁盘需求随帧数和重试次数增长，完成后由用户清理任务目录。服务通过 Tailscale 私有网络暴露给单用户可信 Mac，HTTP 层无账号认证。
 
 本机无需权重的验证：
 
@@ -114,4 +125,4 @@ python -m unittest discover -s tests -v
 
 测试使用合成视频和替代 predictor 验证产物、QA、局部保留、重试/审核门槛、MCP tool 注册以及 HTTP 上传/下载/打包数据面。真实 SAM3 精度、CUDA 显存、大文件 HTTP 传输须在部署环境验证。
 
-已在独立临时环境通过 13 项 CPU 测试（Python 3.13、MCP 1.30.0、OpenCV 4.13），包括 Streamable HTTP 握手、MCP image 响应、归档内容、异步 job 状态/进度/失败 traceback/重启恢复，以及 /upload、/download（Range/越界/404）、/files/info 与 `package_result` 的 HTTP 下载对接。部署目标仍按原工程使用 Python 3.12；未执行真实 GPU/权重推理或跨机器大文件 HTTP 实传。运行任务期间请保持输入视频不变。
+已在独立临时环境通过 CPU 测试（Python 3.13、MCP 1.30.0、OpenCV 4.13），包括 Streamable HTTP 握手、MCP image 响应、归档内容、异步 job 状态/进度/失败 traceback/重启恢复，以及 /upload、/download（Range/越界/404）、/files/info 与 `package_result` 的 HTTP 下载对接。部署目标仍按原工程使用 Python 3.12；未执行真实 GPU/权重推理或跨机器大文件 HTTP 实传。运行任务期间请保持输入视频不变。

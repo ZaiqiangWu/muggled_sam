@@ -59,13 +59,60 @@ class SAM3Backend:
         self.detector = self.model.make_detector_model().eval()
         self.encoding = dict(max_side_length=base_size, use_square_sizing=True)
 
-    def predict(self, video, output, config, parent=None, frame_range=None, progress=None):
+    def prepare_keyframes(self, video, directory, config):
+        """Persist exact candidate logits and previews without initializing tracking memory."""
+        from muggled_sam.demo_helpers.shared_ui_layout import make_hires_mask_uint8
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        pending = set(config['prompt_frames'])
+        results = []
+        with self.torch.inference_mode():
+            for index, frame in frames(video):
+                if index not in pending:
+                    continue
+                detection, _, _ = self.detector.encode_detection_image(frame, **self.encoding)
+                exemplars = self.detector.encode_exemplars(detection, text=config['text_prompt'])
+                masks, _, scores, _ = self.detector.generate_detections(detection, exemplars)
+                if masks is None or masks.shape[1] == 0:
+                    raise ValueError(f'No text candidates at frame {index}; change prompt/frame')
+                masks = masks[0]
+                valid = ((masks > 0).flatten(1).sum(1) >= max(32, masks.shape[-2]*masks.shape[-1]//2000))
+                valid &= scores.flatten() >= config['score_threshold']
+                candidates = self.torch.nonzero(valid).flatten()
+                candidates = candidates[scores.flatten()[candidates].argsort(descending=True)]
+                rank = config['candidate_rank']
+                if len(candidates) <= rank:
+                    raise ValueError(f'Frame {index}: no nonempty candidate at rank {rank} above threshold')
+                # Preview and resumed tracking use the same float32 logits, including interpolation.
+                selected = masks[candidates[rank]].float()
+                if not bool(self.torch.isfinite(selected).all()):
+                    raise ValueError(f'Frame {index}: nonfinite candidate mask')
+                mask = make_hires_mask_uint8(selected, frame.shape[:2])
+                metrics = mask_metrics(mask > 0)
+                if metrics['area'] == 0:
+                    raise ValueError(f'Frame {index}: empty full-resolution candidate mask')
+                np.save(directory/f'{index:08d}.npy', selected.cpu().numpy(), allow_pickle=False)
+                panel = np.concatenate([frame, overlay(frame, mask > 0)], axis=1)
+                write_png(directory/f'{index:08d}.png', panel)
+                results.append(dict(frame=index, confidence=float(scores.flatten()[candidates[rank]].item()),
+                                    metrics=metrics, viewed=False, review=None))
+                pending.remove(index)
+                if not pending:
+                    break
+        if pending:
+            raise ValueError('prompt_frames exceed decoded video length')
+        return results
+
+    def predict(self, video, output, config, parent=None, frame_range=None, progress=None,
+                approved_keyframes=None):
+        prompt_frames = set(config['prompt_frames'])
+        if approved_keyframes is None or set(approved_keyframes) != prompt_frames:
+            raise ValueError('Every keyframe requires visual approval before tracking')
         from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults
         from muggled_sam.demo_helpers.shared_ui_layout import make_hires_mask_uint8
         import shutil
         memory = SAMVideoObjectResults.create(config['max_memories'], config['max_pointers'], 32)
         start, end = frame_range if frame_range else (0, None)
-        prompt_frames = set(config['prompt_frames'])
         actual_prompts = []
         count = 0
         with self.torch.inference_mode():
@@ -81,20 +128,8 @@ class SAM3Backend:
                     continue
                 encoded, _, _ = self.model.encode_image(frame, **self.encoding)
                 if index in prompt_frames:
-                    detection, _, _ = self.detector.encode_detection_image(frame, **self.encoding)
-                    exemplars = self.detector.encode_exemplars(detection, text=config['text_prompt'])
-                    masks, _, scores, _ = self.detector.generate_detections(detection, exemplars)
-                    if masks is None or masks.shape[1] == 0:
-                        raise ValueError(f'No text candidates at frame {index}; change prompt/frame')
-                    masks = masks[0]
-                    valid = ((masks > 0).flatten(1).sum(1) >= max(32, masks.shape[-2]*masks.shape[-1]//2000))
-                    valid &= scores.flatten() >= config['score_threshold']
-                    candidates = self.torch.nonzero(valid).flatten()
-                    candidates = candidates[scores.flatten()[candidates].argsort(descending=True)]
-                    rank = config['candidate_rank']
-                    if len(candidates) <= rank:
-                        raise ValueError(f'Frame {index}: no nonempty candidate at rank {rank} above threshold')
-                    selected = masks[candidates[rank]]
+                    selected = self.torch.from_numpy(np.load(approved_keyframes[index], allow_pickle=False))
+                    selected = selected.to(device=encoded[0].device)
                     memory.store_prompt_result(index, self.model.initialize_from_mask(encoded, selected))
                     memory.prevframe_buffer.clear()
                     mask = make_hires_mask_uint8(selected, frame.shape[:2])

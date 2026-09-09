@@ -76,6 +76,15 @@ class Service:
             result = copy.deepcopy(self.get(job_id))
         result['next_step'] = ('Call get_preview for every preview frame, then submit_visual_review; '
                                'if rejected, call rerun_segmentation with corrected parameters.')
+        if result['status'] == 'awaiting_keyframe_review':
+            result['next_step'] = ('Call get_keyframe_preview then submit_keyframe_review for every keyframe '
+                                   'in the latest attempt. Tracking starts only after all pass.')
+        elif result['status'] in ('queued', 'running'):
+            result['next_step'] = ('Poll get_job_status; awaiting_keyframe_review requires get_keyframe_preview '
+                                   'and submit_keyframe_review for every pending keyframe.')
+        elif result['status'] in ('needs_retry', 'retry_exhausted'):
+            result['next_step'] = ('Call rerun_segmentation with corrected parameters.' if
+                                   result['status'] == 'needs_retry' else 'Retry budget exhausted.')
         result['outputs'] = self.output_paths(result)
         return result
 
@@ -99,7 +108,8 @@ class Service:
     @staticmethod
     def public_status(status):
         """Map internal states to the four coarse job states for polling."""
-        return {'queued':'queued','running':'running','failed':'failed'}.get(status,'completed')
+        return {'queued':'queued','running':'running','failed':'failed',
+                'awaiting_keyframe_review':'running'}.get(status,'completed')
 
     def job_status(self, job_id):
         with self.lock:
@@ -113,6 +123,7 @@ class Service:
                      progress=round(processed/total,4) if total and processed is not None else None,
                      quality_passed=job['quality_passed'], error=job.get('error'),
                      traceback=job.get('traceback'))
+        state['pending_keyframes'] = [k['frame'] for k in attempt.get('keyframes', []) if k['review'] is None]
         if job.get('best_attempt') is not None:
             state['outputs'] = self.output_paths(job)
         return state
@@ -223,9 +234,11 @@ class Service:
         (folder/'rgba').mkdir()
         parent = job['best_attempt'] if frame_range else None
         attempt = dict(index=index, directory=str(folder), config=config, frame_range=frame_range,
-                       parent_attempt=parent, reason=reason, status='queued', visual_review=None)
+                       parent_attempt=parent, reason=reason, status='queued', visual_review=None, keyframes=[])
         job['attempts'].append(attempt)
         job.update(status='queued', quality_passed=False)
+        job.pop('error', None)
+        job.pop('traceback', None)
         self.save(job)
         self.executor.submit(self.run, job['job_id'], index)
 
@@ -248,15 +261,29 @@ class Service:
                     counter.update(count=count, time=now)
                     self.save(job)
         try:
+            if not attempt['keyframes']:
+                keyframes = self.backend.prepare_keyframes(job['video_path'], directory/'keyframes', attempt['config'])
+                if (len(keyframes) != len(attempt['config']['prompt_frames']) or
+                        {k['frame'] for k in keyframes} != set(attempt['config']['prompt_frames'])):
+                    raise ValueError('Missing keyframe candidates')
+                with self.lock:
+                    attempt.update(keyframes=keyframes, status='awaiting_keyframe_review')
+                    job['status'] = 'awaiting_keyframe_review'
+                    self.save(job)
+                return
+            if not all(k['review'] and k['review']['passed'] for k in attempt['keyframes']):
+                raise ValueError('Every keyframe must pass visual review before tracking')
             parent = None
             if attempt['parent_attempt'] is not None:
                 parent = Path(job['attempts'][attempt['parent_attempt']]['directory'])/'rgba'
             actual = self.backend.predict(job['video_path'], directory/'rgba', attempt['config'],
-                                          parent, attempt['frame_range'], progress)
+                                          parent, attempt['frame_range'], progress,
+                                          approved_keyframes={k['frame']: directory/'keyframes'/f"{k['frame']:08d}.npy"
+                                                              for k in attempt['keyframes']})
             seams = []
             if attempt['frame_range']:
                 seams = [i+d for i in attempt['frame_range'] for d in (-1,0,1)]
-            report = analyze(job['video_path'], directory, job['top_k'], job['random_check_frames'], seams)
+            report = analyze(job['video_path'], directory, job['top_k'], job['random_check_frames'], [*seams, *actual])
             with self.lock:
                 attempt.update(status='awaiting_visual_review', actual_prompt_frames=actual,
                     rgba_dir=str(directory/'rgba'), overlay_path=str(directory/'overlay.mp4'),
@@ -279,6 +306,46 @@ class Service:
                 job.update(status='failed', error=attempt['error'], traceback=attempt['traceback'])
                 self.save(job)
 
+    def keyframe_preview(self, job_id, attempt_index, frame):
+        with self.lock:
+            job = self.get(job_id)
+            attempt, keyframe = self.pending_keyframe(job, attempt_index, frame)
+            data = (Path(attempt['directory'])/'keyframes'/f'{frame:08d}.png').read_bytes()
+            keyframe['viewed'] = True
+            self.save(job)
+            return data
+
+    @staticmethod
+    def pending_keyframe(job, attempt_index, frame):
+        if (job['status'] != 'awaiting_keyframe_review' or
+                attempt_index != len(job['attempts'])-1):
+            raise ValueError('This attempt is not awaiting keyframe review')
+        attempt = job['attempts'][attempt_index]
+        keyframe = next((k for k in attempt['keyframes'] if k['frame'] == frame), None)
+        if keyframe is None or keyframe['review'] is not None:
+            raise ValueError('Frame is not a pending keyframe')
+        return attempt, keyframe
+
+    def review_keyframe(self, job_id, attempt_index, frame, passed, notes):
+        with self.lock:
+            job = self.get(job_id)
+            attempt, keyframe = self.pending_keyframe(job, attempt_index, frame)
+            if not keyframe['viewed']:
+                raise ValueError('Retrieve get_keyframe_preview before submitting review')
+            if type(passed) is not bool or not notes.strip():
+                raise ValueError('Supply a boolean decision and visual review notes')
+            keyframe['review'] = dict(passed=passed, notes=notes)
+            if not passed:
+                attempt['status'] = 'keyframe_rejected'
+                job['status'] = ('retry_exhausted' if len(job['attempts'])-1 >= job['max_retry']
+                                 else 'needs_retry')
+            elif all(k['review'] and k['review']['passed'] for k in attempt['keyframes']):
+                job['status'] = attempt['status'] = 'queued'
+                self.save(job)
+                self.executor.submit(self.run, job_id, attempt_index)
+            self.save(job)
+        return self.result(job_id)
+
     def select_best(self, job):
         completed = [a for a in job['attempts'] if 'mean_anomaly_score' in a]
         if not completed:
@@ -299,7 +366,7 @@ class Service:
     def review(self, job_id, attempt_index, passed, inspected_frames, issues, notes):
         with self.lock:
             job = self.get(job_id)
-            if job['status'] in ('queued','running'):
+            if job['status'] in ('queued','running','awaiting_keyframe_review'):
                 raise ValueError('Wait for the active attempt to finish')
             attempt = job['attempts'][attempt_index]
             if attempt['status'] != 'awaiting_visual_review':
@@ -404,7 +471,9 @@ def build_server(args):
         an absolute path inside a configured --input-root; never base64-encode videos or
         transfer them via SSH/SCP/SFTP. output_dir is always Ubuntu staging storage.
         output_location=mac requests an archive for subsequent download, not a Mac path.
-        Continue by viewing ALL previews and submitting visual review; never infer visual
+        First inspect EVERY keyframe using get_keyframe_preview and submit_keyframe_review.
+        Tracking waits until all keyframes pass; rejected candidates require rerun_segmentation.
+        Then continue by viewing ALL previews and submitting visual review; never infer visual
         correctness from numerical_passed. Use rerun_segmentation after a rejected review.
         """
         parameters = locals().copy()
@@ -422,7 +491,8 @@ def build_server(args):
         internal_status, processed_frames/total_frames/progress (0..1, best effort:
         total from container metadata, exact frame count at completion). Failed jobs
         carry error plus full traceback. Completed jobs also carry outputs; use
-        get_job_result to list downloadable artifact paths."""
+        get_job_result to list downloadable artifact paths. internal_status=awaiting_keyframe_review
+        (public status=running) requires reviewing pending_keyframes to resume tracking."""
         return service.job_status(job_id)
 
     @mcp.tool()
@@ -431,6 +501,23 @@ def build_server(args):
         job.json), the existing files, and rgba_file_count. Every path is
         work-root-relative for GET /download/<path>; package_result bundles them."""
         return service.job_result(job_id)
+
+    @mcp.tool()
+    def get_keyframe_preview(job_id: str, attempt_index: int, frame: int) -> Image:
+        """Inspect the exact candidate BEFORE it enters tracking memory: original left, overlay right.
+        Check target identity, coverage, boundaries and unwanted foreground/background inclusion.
+        Every prompt frame must be inspected, including frame zero and partial retry start.
+        """
+        return Image(data=service.keyframe_preview(job_id, attempt_index, frame), format='png')
+
+    @mcp.tool()
+    def submit_keyframe_review(job_id: str, attempt_index: int, frame: int, passed: bool, notes: str) -> dict:
+        """Record visual correctness after get_keyframe_preview; numerical confidence is insufficient.
+        All keyframes must pass before tracking starts with these exact masks. Rejecting any
+        candidate stops this attempt; call rerun_segmentation with corrected text/rank/frames.
+        Explain the visual decision in notes. Final video visual review is still required.
+        """
+        return service.review_keyframe(job_id, attempt_index, frame, passed, notes)
 
     @mcp.tool()
     def get_preview(job_id: str, attempt_index: int, frame: int) -> Image:
@@ -458,7 +545,7 @@ def build_server(args):
     def rerun_segmentation(job_id: str, reason: str, text_prompt: str | None = None,
                            prompt_frames: list[int] | None = None, frame_range: list[int] | None = None,
                            candidate_rank: int | None = None) -> dict:
-        """Bounded retry after visual rejection. Change text, candidate rank or key frames.
+        """Bounded retry after keyframe/video visual rejection or failure. Change text, candidate rank or key frames.
         Inclusive frame_range optionally reruns only that interval and copies all other
         RGBA frames from best attempt. Tracking is reinitialized at range start; inspect
         temporal seams in the new full-video QA. max_retry is enforced across all attempts.
@@ -474,7 +561,7 @@ def build_server(args):
         """
         with service.lock:
             job = copy.deepcopy(service.get(job_id))
-            if job['status'] in ('queued','running') or job['best_attempt'] is None:
+            if job['status'] in ('queued','running','awaiting_keyframe_review') or job['best_attempt'] is None:
                 raise ValueError('Wait for a completed attempt')
         archive = service.package(job)
         relative, url = download_reference(service.root, archive)
