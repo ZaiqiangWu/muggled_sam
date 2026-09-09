@@ -62,13 +62,13 @@ curl --fail --show-error \
 
 以下是 Codex 调用 MCP tools 的参数示例，`JOB` 替换为返回的 job_id，`video_path` 用 `POST /upload` 返回的 `path`（或 input-root 内已有文件的相对/绝对路径）：
 
-1. `segment_video`：
+1. `segment_video`：提交后立即返回 `job_id`，不阻塞 HTTP 请求；分割在后台异步执行。多任务可以同时提交，但 GPU 推理走同一 worker 队列串行（同一时刻只有一个 SAM3 推理，避免显存抢占）。
 
 ```json
 {"video_path":"UPLOADED_FILE_ID/input.mp4","text_prompt":"quilted jacket","output_location":"mac","top_k":8,"random_check_frames":4,"max_retry":2,"prompt_frames":[0],"candidate_rank":0}
 ```
 
-2. 调用 `get_segmentation({"job_id":"JOB"})`，间隔数秒查询，直到 `awaiting_visual_review` 或 `failed`。分割后台运行，HTTP 请求不用等待整个视频；返回任务 ID、状态、各次尝试配置、异常帧与分数、文件路径及重试历史。每一帧的完整指标位于 `analysis.json`。
+2. 轮询 `get_job_status({"job_id":"JOB"})`，间隔数秒查询：`status` 为 `queued/running/completed/failed`，`running` 时返回 `processed_frames`/`total_frames`/`progress`（0..1，尽力而为：总帧数来自容器元数据、可能为 null，完成时改用精确帧数）。失败时返回带类型的 `error` 和完整 `traceback`。完成后调用 `get_job_result({"job_id":"JOB"})` 获取全部产物路径（work-root 相对，可直接拼 `/download/<path>`），再调用 `get_segmentation({"job_id":"JOB"})` 查看各次尝试配置、异常帧与分数及重试历史。每一帧的完整指标位于 `analysis.json`。
 
 3. 对本次 attempt 的每个 `preview_frames` 调用 `get_preview({"job_id":"JOB","attempt_index":0,"frame":42})`。返回真实 MCP image，左边原图、右边 overlay，不要求 Mac 读取 Ubuntu 路径。检查衣服遗漏、皮肤/头发/背景误分、身份漂移、消失和边界；必要时下载并查看完整 MP4。服务要求所有预览都已取回，视觉结论仍由 Codex 负责，不能用数值通过代替视觉审核。
 
@@ -104,7 +104,7 @@ tar -xzf /Users/ME/Downloads/sam3-result.tar.gz -C /Users/ME/Downloads/sam3-resu
 
 数值指标逐帧计算：相邻 mask IoU、相对面积变化、centroid 和 bbox 跳变（归一化到图像对角线）、消失、扩张和碎片数；阈值和分数组合见 `mask_metrics`。预览包含分数最高 top_k、固定随机种子抽取的正常帧、首尾帧和局部重跑接缝。任何版本在视觉审核前 `quality_passed=false`；正常帧不足时仅选择实际可用的正常帧。抽样视觉审核无法保证未查看帧全部正确。
 
-权重加载错误会阻止启动；任务错误有 traceback 日志以及带类型的 error 字段，失败输出不参与最佳选择。每个任务和 attempt 独立，输出不静默覆盖；中断重启后任务标为 failed，可在剩余预算内重试。成功版本保留用于比较/下载，不自动删除用户产物；失败的 RGBA 和临时打包/下载文件会清理。磁盘需求随帧数和重试次数增长，完成后由用户清理任务目录。服务通过 Tailscale 私有网络暴露给单用户可信 Mac，HTTP 层无账号认证。
+权重加载错误会阻止启动；任务错误有 traceback 日志以及带类型的 error 字段，失败输出不参与最佳选择。每个任务和 attempt 独立，输出不静默覆盖；中断重启后任务标为 failed，可在剩余预算内重试。损坏的 job.json 会在启动时被跳过并告警，不会导致服务启动失败；单个任务失败只写回该任务的 job.json，不影响服务进程和其余任务。成功版本保留用于比较/下载，不自动删除用户产物；失败的 RGBA 和临时打包/下载文件会清理。磁盘需求随帧数和重试次数增长，完成后由用户清理任务目录。服务通过 Tailscale 私有网络暴露给单用户可信 Mac，HTTP 层无账号认证。
 
 本机无需权重的验证：
 
@@ -114,4 +114,4 @@ python -m unittest discover -s tests -v
 
 测试使用合成视频和替代 predictor 验证产物、QA、局部保留、重试/审核门槛、MCP tool 注册以及 HTTP 上传/下载/打包数据面。真实 SAM3 精度、CUDA 显存、大文件 HTTP 传输须在部署环境验证。
 
-已在独立临时环境通过 10 项 CPU 测试（Python 3.13、MCP 1.30.0、OpenCV 4.13），包括 Streamable HTTP 握手、MCP image 响应、归档内容以及 /upload、/download（Range/越界/404）、/files/info 与 `package_result` 的 HTTP 下载对接。部署目标仍按原工程使用 Python 3.12；未执行真实 GPU/权重推理或跨机器大文件 HTTP 实传。运行任务期间请保持输入视频不变。
+已在独立临时环境通过 13 项 CPU 测试（Python 3.13、MCP 1.30.0、OpenCV 4.13），包括 Streamable HTTP 握手、MCP image 响应、归档内容、异步 job 状态/进度/失败 traceback/重启恢复，以及 /upload、/download（Range/越界/404）、/files/info 与 `package_result` 的 HTTP 下载对接。部署目标仍按原工程使用 Python 3.12；未执行真实 GPU/权重推理或跨机器大文件 HTTP 实传。运行任务期间请保持输入视频不变。

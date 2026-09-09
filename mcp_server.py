@@ -10,10 +10,12 @@ from pathlib import Path
 import shutil
 import tarfile
 import threading
+import time
+import traceback
 import uuid
 
 from sam3_http_files import DEFAULT_MAX_UPLOAD_BYTES, download_reference, register_file_routes
-from sam3_mcp_pipeline import SAM3Backend, analyze, write_json
+from sam3_mcp_pipeline import SAM3Backend, analyze, video_frame_count, write_json
 
 LOG = logging.getLogger('sam3-mcp')
 
@@ -28,9 +30,19 @@ class Service:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sam3-gpu')
         self.jobs = {}
         for path in self.root.rglob('job.json'):
-            job = json.loads(path.read_text())
+            try:
+                job = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                LOG.warning('Skipping unreadable job manifest %s: %s', path, exc)
+                continue
+            if not isinstance(job, dict) or not isinstance(job.get('job_id'), str) or not job.get('status'):
+                LOG.warning('Skipping malformed job manifest %s', path)
+                continue
             if job['status'] in ('queued','running'):
                 job.update(status='failed', error='Server restarted during inference; submit a retry')
+            for attempt in job.get('attempts',[]):
+                if isinstance(attempt, dict) and attempt.get('status') in ('queued','running'):
+                    attempt.update(status='failed', error=job['error'])
             self.jobs[job['job_id']] = job
 
     def save(self, job):
@@ -83,6 +95,47 @@ class Service:
                     previews={str(frame): (attempt_dir/'previews'/f'{frame:08d}.png').relative_to(self.root).as_posix()
                               for frame in attempt.get('preview_frames', [])})
         return outputs
+
+    @staticmethod
+    def public_status(status):
+        """Map internal states to the four coarse job states for polling."""
+        return {'queued':'queued','running':'running','failed':'failed'}.get(status,'completed')
+
+    def job_status(self, job_id):
+        with self.lock:
+            job = copy.deepcopy(self.get(job_id))
+        attempt = job['attempts'][-1] if job['attempts'] else {}
+        total = attempt.get('total_frames')
+        processed = attempt.get('processed_frames')
+        state = dict(job_id=job_id, status=self.public_status(job['status']),
+                     internal_status=job['status'], attempt=attempt.get('index'),
+                     processed_frames=processed, total_frames=total,
+                     progress=round(processed/total,4) if total and processed is not None else None,
+                     quality_passed=job['quality_passed'], error=job.get('error'),
+                     traceback=job.get('traceback'))
+        if job.get('best_attempt') is not None:
+            state['outputs'] = self.output_paths(job)
+        return state
+
+    def job_result(self, job_id):
+        with self.lock:
+            job = copy.deepcopy(self.get(job_id))
+        outputs = self.output_paths(job)
+        files = [outputs[key] for key in ('job_json','validation_video','analysis')
+                 if outputs.get(key) and (self.root/outputs[key]).is_file()]
+        files += [relative for relative in outputs.get('previews',{}).values()
+                  if (self.root/relative).is_file()]
+        archive = (Path(job['directory'])/'result.tar.gz').relative_to(self.root).as_posix()
+        if (self.root/archive).is_file():
+            files.append(archive)
+        rgba_count = None
+        best = job.get('best_attempt')
+        if best is not None and best < len(job['attempts']) and 'rgba_dir' in job['attempts'][best]:
+            rgba_count = len(list(Path(job['attempts'][best]['rgba_dir']).glob('*.png')))
+        return dict(job_id=job_id, status=self.public_status(job['status']),
+                    internal_status=job['status'], quality_passed=job['quality_passed'],
+                    error=job.get('error'), outputs=outputs, files=files,
+                    rgba_file_count=rgba_count)
 
     def newest_mtime(self, directory):
         newest = 0.0
@@ -181,15 +234,25 @@ class Service:
             job = self.get(job_id)
             attempt = job['attempts'][index]
             job['status'] = attempt['status'] = 'running'
+            attempt.update(processed_frames=0, total_frames=video_frame_count(job['video_path']))
             self.save(job)
         directory = Path(attempt['directory'])
         LOG.info('Starting job=%s attempt=%s',job_id,index)
+        counter = dict(count=0, time=0.0)
+        def progress(count):
+            # Persist at most every ~2s / 64 frames so Lustre writes stay cheap.
+            with self.lock:
+                attempt['processed_frames'] = count
+                now = time.monotonic()
+                if count-counter['count'] >= 64 or now-counter['time'] >= 2:
+                    counter.update(count=count, time=now)
+                    self.save(job)
         try:
             parent = None
             if attempt['parent_attempt'] is not None:
                 parent = Path(job['attempts'][attempt['parent_attempt']]['directory'])/'rgba'
             actual = self.backend.predict(job['video_path'], directory/'rgba', attempt['config'],
-                                          parent, attempt['frame_range'])
+                                          parent, attempt['frame_range'], progress)
             seams = []
             if attempt['frame_range']:
                 seams = [i+d for i in attempt['frame_range'] for d in (-1,0,1)]
@@ -201,7 +264,8 @@ class Service:
                     preview_paths=[str(directory/'previews'/f'{i:08d}.png') for i in report['preview_frames']],
                     preview_frames=report['preview_frames'], viewed_frames=[],
                     anomaly_frames=report['anomaly_frames'], numerical_passed=report['numerical_passed'],
-                    mean_anomaly_score=report['mean_anomaly_score'], frame_count=report['frame_count'])
+                    mean_anomaly_score=report['mean_anomaly_score'], frame_count=report['frame_count'],
+                    total_frames=report['frame_count'], processed_frames=report['frame_count'])
                 self.select_best(job)
                 job['status'] = 'awaiting_visual_review'
                 self.save(job)
@@ -210,8 +274,9 @@ class Service:
             # Incomplete artifacts are not candidates for best-result selection.
             shutil.rmtree(directory/'rgba',ignore_errors=True)
             with self.lock:
-                attempt.update(status='failed', error=f'{type(exc).__name__}: {exc}')
-                job.update(status='failed', error=attempt['error'])
+                attempt.update(status='failed', error=f'{type(exc).__name__}: {exc}',
+                               traceback=traceback.format_exc())
+                job.update(status='failed', error=attempt['error'], traceback=attempt['traceback'])
                 self.save(job)
 
     def select_best(self, job):
@@ -327,7 +392,11 @@ def build_server(args):
                       score_threshold: float = 0.0, max_memories: int = 6, max_pointers: int = 15,
                       object_score_threshold: float = 0.0, input_location: str = 'ubuntu',
                       output_location: str = 'ubuntu') -> dict:
-        """Start SAM3 -> RGBA -> temporal QA -> overlay/previews. Poll get_segmentation.
+        """Submit SAM3 -> RGBA -> temporal QA -> overlay/previews; returns job_id
+        immediately. Inference runs in the background on one serialized GPU queue
+        (multiple jobs may be submitted, but only one SAM3 inference runs at a time).
+        Poll get_job_status for status and frame progress, then get_segmentation for
+        artifacts and review state once completed.
 
         Frame indices are zero-based. The first prompt frame must be 0. Candidate rank
         selects among the top four nonempty detections sorted by confidence. video_path
@@ -346,6 +415,22 @@ def build_server(args):
     def get_segmentation(job_id: str) -> dict:
         """Poll background task; returns best artifacts, anomalies, reviews and retry history."""
         return service.result(job_id)
+
+    @mcp.tool()
+    def get_job_status(job_id: str) -> dict:
+        """Poll async job progress: status queued/running/completed/failed,
+        internal_status, processed_frames/total_frames/progress (0..1, best effort:
+        total from container metadata, exact frame count at completion). Failed jobs
+        carry error plus full traceback. Completed jobs also carry outputs; use
+        get_job_result to list downloadable artifact paths."""
+        return service.job_status(job_id)
+
+    @mcp.tool()
+    def get_job_result(job_id: str) -> dict:
+        """List job artifacts: outputs (rgba_dir, validation_video, analysis, previews,
+        job.json), the existing files, and rgba_file_count. Every path is
+        work-root-relative for GET /download/<path>; package_result bundles them."""
+        return service.job_result(job_id)
 
     @mcp.tool()
     def get_preview(job_id: str, attempt_index: int, frame: int) -> Image:

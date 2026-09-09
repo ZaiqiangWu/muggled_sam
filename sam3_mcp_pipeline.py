@@ -36,6 +36,16 @@ def frames(path):
         cap.release()
 
 
+def video_frame_count(video):
+    """Container-declared frame count; None when metadata is missing or unreliable."""
+    cap = cv2.VideoCapture(str(video))
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+    finally:
+        cap.release()
+    return total if total > 0 else None
+
+
 class SAM3Backend:
     def __init__(self, weights, device='cuda', base_size=2048, float32=False):
         import torch
@@ -49,7 +59,7 @@ class SAM3Backend:
         self.detector = self.model.make_detector_model().eval()
         self.encoding = dict(max_side_length=base_size, use_square_sizing=True)
 
-    def predict(self, video, output, config, parent=None, frame_range=None):
+    def predict(self, video, output, config, parent=None, frame_range=None, progress=None):
         from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults
         from muggled_sam.demo_helpers.shared_ui_layout import make_hires_mask_uint8
         import shutil
@@ -66,6 +76,8 @@ class SAM3Backend:
                     if parent is None:
                         raise ValueError('Partial runs require a completed parent attempt')
                     shutil.copyfile(parent / target.name, target)
+                    if progress is not None:
+                        progress(count)
                     continue
                 encoded, _, _ = self.model.encode_image(frame, **self.encoding)
                 if index in prompt_frames:
@@ -99,6 +111,8 @@ class SAM3Backend:
                 bgra = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
                 bgra[:, :, 3] = mask
                 write_png(target, bgra)
+                if progress is not None:
+                    progress(count)
         if not count:
             raise ValueError('Video contains no decodable frames')
         if end is not None and end >= count:

@@ -66,7 +66,7 @@ Mac 上的 Codex 通过 `http://100.120.152.79:8765` 直连 SAM3 MCP 服务（MC
 3. Mac 本地视频：`curl -F "file=@/path/to/video.mp4" http://100.120.152.79:8765/upload`。
 4. 使用返回 JSON 的 `path`（相对 input-root，如 `<file_id>/video.mp4`）。
 5. `segment_video(video_path=<该 path>, ...)`，其余参数见 MCP_README.md。
-6. 用 `get_segmentation` 轮询 job；查看全部预览帧后 `submit_visual_review`，必要时 `rerun_segmentation`。
+6. `segment_video` 立即返回 `job_id`（异步执行，GPU 队列串行）：先轮询 `get_job_status` 看 `queued/running/completed/failed` 与帧进度，再 `get_job_result` 取产物路径，`get_segmentation` 查看异常与重试历史；查看全部预览帧后 `submit_visual_review`，必要时 `rerun_segmentation`。
 7. 完成后 `package_result(job_id)` 得到 work-root 相对路径 `download`。
 8. `curl -o <本地目录>/result.tar.gz "http://100.120.152.79:8765/download/<download>"` 下载到用户指定目录。
 
