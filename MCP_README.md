@@ -129,6 +129,14 @@ tar -xf /Users/ME/Downloads/sam3-result.tar -C /Users/ME/Downloads/sam3-result
 
 ## QA、故障与限制
 
+轮询可使用仓库中的 `sam3_polljob.py`（仅 Python 标准库）：
+
+```sh
+python3 sam3_polljob.py JOB 20 --session-file /tmp/sam3_mcp_sid.txt
+```
+
+默认单次 HTTP 请求总期限 15 秒、连续失败 3 次后退出、10 分钟无进展退出、总等待上限 30 分钟。可通过 `--request-timeout`、`--max-errors`、`--stall-timeout`、`--max-wait` 调整（时间单位秒）。输出使用真实墙钟经过时间；SSE 读到对应响应事件即返回，不等待连接关闭。`awaiting_keyframe_review` 和 `awaiting_visual_review` 会立即提示审核并停止轮询；completed/failed 也会退出。HTTP 4xx（408/429 除外）、MCP 错误和无效响应直接报错，失效 session 需重新建立。退出码 0 表示完成或等待审核，1 表示任务/协议错误，2 表示超时或连接重试达到上限，130 表示手动中断。轮询停止不会取消服务端任务；服务端 QA 阶段不更新帧进度，长视频可适当调大无进展期限。
+
 数值指标逐帧计算：相邻 mask IoU、相对面积变化、centroid 和 bbox 跳变（归一化到图像对角线）、消失、扩张和碎片数；阈值和分数组合见 `mask_metrics`。最终视频预览包含分数最高 top_k、固定随机种子抽取的正常帧、首尾帧、所有 keyframe 和局部重跑接缝。任何版本在视觉审核前 `quality_passed=false`；正常帧不足时仅选择实际可用的正常帧。抽样视觉审核无法保证未查看帧全部正确。
 
 权重加载错误会阻止启动；任务错误有 traceback 日志以及带类型的 error 字段，失败输出不参与最佳选择。每个任务和 attempt 独立，输出不静默覆盖；推理中断重启后任务标为 failed（等待 keyframe 审核的任务保留审核状态），可在剩余预算内重试。损坏的 job.json 会在启动时被跳过并告警，不会导致服务启动失败；单个任务失败只写回该任务的 job.json，不影响服务进程和其余任务。成功版本保留用于比较/下载，不自动删除用户产物；失败的 RGBA 和临时打包/下载文件会清理。磁盘需求随帧数和重试次数增长，完成后由用户清理任务目录。服务通过 Tailscale 私有网络暴露给单用户可信 Mac，HTTP 层无账号认证。
