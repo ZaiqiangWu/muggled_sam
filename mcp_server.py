@@ -230,6 +230,7 @@ class Service:
 
 def build_server(args):
     from mcp.server.fastmcp import FastMCP, Image
+    from mcp.server.transport_security import TransportSecuritySettings
     service = None
 
     @asynccontextmanager
@@ -244,7 +245,20 @@ def build_server(args):
         finally:
             service.executor.shutdown(wait=True)
 
-    mcp = FastMCP('SAM3 video segmentation',host=args.host,port=args.port,lifespan=lifespan)
+    # Binding an interface and accepting a HTTP Host are separate settings.
+    # Wildcard bind addresses are not client-facing addresses.
+    hosts = {'127.0.0.1:*', 'localhost:*', '[::1]:*'}
+    if args.host not in ('0.0.0.0', '::'):
+        hostname = f'[{args.host}]' if ':' in args.host else args.host
+        hosts.add(f'{hostname}:{args.port}')
+    hosts.update(getattr(args, 'allowed_host', None) or [])
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=sorted(hosts),
+        allowed_origins=sorted(f'{scheme}://{host}' for host in hosts for scheme in ('http', 'https')),
+    )
+    mcp = FastMCP('SAM3 video segmentation',host=args.host,port=args.port,lifespan=lifespan,
+                  transport_security=security)
 
     @mcp.tool()
     def segment_video(video_path: str, text_prompt: str, output_dir: str | None = None,
@@ -336,8 +350,11 @@ def build_server(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--weights',default='model_weights/sam3.pt')
-    parser.add_argument('--host',default='127.0.0.1',choices=['127.0.0.1','localhost','::1'],
-                        help='Loopback only; use an authenticated SSH tunnel or Tailscale SSH tunnel')
+    parser.add_argument('--host',default='127.0.0.1',
+                        help='Bind address: loopback by default; use a Tailscale/LAN IP for direct access')
+    parser.add_argument('--allowed-host',action='append',default=[],
+                        help='Additional HTTP Host, e.g. 100.120.152.79:8765; repeat for aliases. '
+                             'Required for remote access when binding 0.0.0.0 or ::')
     parser.add_argument('--port',type=int,default=8765)
     parser.add_argument('--work-root',default='./mcp_jobs')
     parser.add_argument('--input-root',action='append',required=True)

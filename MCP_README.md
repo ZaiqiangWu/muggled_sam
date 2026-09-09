@@ -11,10 +11,10 @@
 ```sh
 conda activate sam3
 pip install -r requirements_my.txt -r requirements_mcp.txt
-mkdir -p /home/USER/sam3-input /home/USER/sam3-output
+mkdir -p sam3-input sam3-output
 python mcp_server.py --weights ./model_weights/sam3.pt \
-  --input-root /home/USER/sam3-input \
-  --work-root /home/USER/sam3-output --host 127.0.0.1 --port 8765
+  --input-root sam3-input \
+  --work-root sam3-output --host 127.0.0.1 --port 8765
 ```
 
 请在调度器分配的 GPU compute node 内运行，勿占用 login node GPU。默认 CUDA / 项目原有 dtype 配置，可传 `--float32` 或 `--device cpu`；后者极慢。模型与 detector 在启动时加载一次，全部推理由同一个后台线程串行执行；只运行一个服务进程，不要配置多个 Web workers 共用输出目录/GPU。启动需等待权重加载完成。输入根目录可重复指定，输出目录必须是 work root 下的新目录。
@@ -23,13 +23,27 @@ OpenCV 必须支持 MP4V 编码；生成的是无音轨、恒定 FPS 的检查�
 
 ## Mac 连接与文件传输
 
-服务仅允许 loopback 监听；HTTP 本身不提供账号认证，通过 SSH（也可通过 Tailscale SSH）认证并加密。建立到**实际运行服务的 compute node**的隧道：
+服务默认 loopback 监听；HTTP 本身不提供账号认证，通过 SSH（也可通过 Tailscale SSH）认证并加密。建立到**实际运行服务的 compute node**的隧道：
 
 ```sh
 ssh -N -o ExitOnForwardFailure=yes -L 8765:127.0.0.1:8765 USER@COMPUTE_NODE
 # 若需 login node 中转：
 ssh -N -J USER@LOGIN_NODE -L 8765:127.0.0.1:8765 USER@COMPUTE_NODE
 ```
+
+也可以直接绑定 Ubuntu 的 Tailscale 地址，无需 SSH 隧道：
+
+```sh
+python mcp_server.py --weights ./model_weights/sam3.pt \
+  --input-root ./sam3-input --work-root ./sam3-output \
+  --host 100.120.152.79 --port 8765
+```
+
+Mac 的 MCP URL 改为 `http://100.120.152.79:8765/mcp`，两端需能通过 Tailscale 互访。
+如需监听所有 IPv4 网卡，使用 `--host 0.0.0.0 --allowed-host 100.120.152.79:8765`。
+绑定具体地址会自动将该地址及端口加入 HTTP Host/Origin 白名单；使用别名访问时可重复
+`--allowed-host sam3-host:8765` 添加白名单。默认保留 DNS rebinding 检查。
+白名单不是身份认证；直连部署应通过 Tailscale ACL 或防火墙将端口限制给可信客户端。
 
 将 [examples/codex_mcp.toml](examples/codex_mcp.toml) 合并到 Mac 的 `~/.codex/config.toml`。配置依据 [Codex 官方 MCP 文档](https://developers.openai.com/codex/mcp)；服务使用 [官方 Python MCP SDK v1](https://github.com/modelcontextprotocol/python-sdk/tree/v1.x) 的 Streamable HTTP。依赖限制 `<2`，避免 v2 接口变化。
 
