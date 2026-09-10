@@ -1292,13 +1292,11 @@ class Session:
 
         disp = frame_bgr.copy()
 
-        # Selected object's contours (orange, like DrawPolygonsOverlay((100,10,255)))
-        have, contours_norm = get_contours_from_mask(disp_mask_uint8, normalize=True)
-        if have:
-            contours_px = pixelize_contours(tuple(contours_norm), disp.shape)
-            for c in contours_px:
-                cv2.polylines(disp, [np.asarray(c, dtype=np.int32)], isClosed=True,
-                              color=(0, 128, 255), thickness=2)
+        # Selected object: semi-transparent green overlay over the mask region
+        if (disp_mask_uint8 > 0).any():
+            overlay = disp.copy()
+            overlay[disp_mask_uint8 > 0] = (0, 230, 255)  # BGR green
+            disp = cv2.addWeighted(overlay, 0.35, disp, 0.65, 0)
 
         # Unselected objects' outlines (dim, like the unselected overlay)
         for other in self.objiter:
