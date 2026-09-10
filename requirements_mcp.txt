@@ -1,3 +1,0 @@
-# Install torch/torchvision and requirements_my.txt as described in my_readme.md first.
-mcp>=1.12,<2
-python-multipart>=0.0.7
