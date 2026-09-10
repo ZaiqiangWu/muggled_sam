@@ -193,6 +193,7 @@ fieldset {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
 legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
@@ -214,18 +215,22 @@ input[type="text"], input[type="number"] {
 
 input[type="range"] { width: 100%; }
 
+#text-fieldset .row { flex-wrap: wrap; }
+#text-input { flex: 1 1 auto; min-width: 120px; }
+
 /* ---------- settings ---------- */
-#settings { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+#settings { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px; min-width: 0; }
 #settings summary { cursor: pointer; color: var(--muted); }
-.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin: 8px 0; }
+.settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 10px; margin: 8px 0; }
 .settings-grid label { flex-direction: column; align-items: stretch; gap: 2px; font-size: 12px; color: var(--muted); }
 .settings-grid label input { width: 100%; }
-.checks { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.checks { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px; }
 .checks label { flex-direction: row; color: var(--text); font-size: 12px; }
 .checks-inline { color: var(--muted); font-size: 12px; }
 
 /* ---------- log ---------- */
 .log {
+  min-width: 0;
   background: #101216;
   border: 1px solid var(--border);
   border-radius: 6px;
