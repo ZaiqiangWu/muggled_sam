@@ -320,6 +320,7 @@ function renderDisplay(res) {
   drawImageB64(frameCanvas, res.frame_b64).then(() => {
     overlayCanvas.width = frameCanvas.width;
     overlayCanvas.height = frameCanvas.height;
+    $("previews").style.aspectRatio = frameCanvas.width + " / " + frameCanvas.height;
     drawOverlay();
   });
   setPreviews(res.previews_b64);

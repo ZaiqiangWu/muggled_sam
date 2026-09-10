@@ -112,8 +112,8 @@ html, body {
   grid-template-rows: 1fr 1fr;
   gap: 6px;
   flex: 0 0 auto;
-  aspect-ratio: 1 / 1;  /* square: width follows the stretched (video) height */
-  max-width: 45%;
+  aspect-ratio: 16 / 9; /* fallback; app.js overrides with the actual frame ratio */
+  max-width: 100%;
 }
 
 .preview-slot {
