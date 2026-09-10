@@ -343,8 +343,10 @@ function renderDisplay(res) {
     syncMaskGridSize();
     drawOverlay();
   });
-  setPreviews(res.previews_b64);
+  // updateInfoFromDisplay first: setPreviews toggles the selected slot
+  // using state.maskIdx, which updateInfoFromDisplay refreshes
   updateInfoFromDisplay(res);
+  setPreviews(res.previews_b64);
 }
 
 // ------------------------------------------------------------------ status poll
