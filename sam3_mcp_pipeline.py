@@ -92,6 +92,7 @@ class SAM3Backend:
                 metrics = mask_metrics(mask > 0)
                 if metrics['area'] == 0:
                     raise ValueError(f'Frame {index}: empty full-resolution candidate mask')
+                tracking_components = self.split_tracking_masks(mask > 0, config['max_tracking_objects'])
                 np.save(directory/f'{index:08d}.npy', selected.cpu().numpy(), allow_pickle=False)
                 previews = []
                 for candidate_rank, candidate in enumerate(candidates[:4]):
@@ -101,13 +102,31 @@ class SAM3Backend:
                                          score=float(scores.flatten()[candidate].item()), mask=candidate_mask > 0))
                 preview_info = write_keyframe_previews(directory.parent, index, frame, previews, rank)
                 results.append(dict(frame=index, confidence=float(scores.flatten()[candidates[rank]].item()),
-                                    metrics=metrics, viewed=False, review=None, **preview_info))
+                                    metrics=metrics, viewed=False, review=None,
+                                    tracking_components=[dict(object_index=object_index,
+                                                              area=int(component.sum()))
+                                                         for object_index, component in enumerate(tracking_components)],
+                                    **preview_info))
                 pending.remove(index)
                 if not pending:
                     break
         if pending:
             raise ValueError('prompt_frames exceed decoded video length')
         return results
+
+    @staticmethod
+    def split_tracking_masks(mask, max_objects):
+        """Return the largest meaningful disconnected regions as separate object prompts."""
+        mask = np.asarray(mask, dtype=bool)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype('uint8'), 8)
+        minimum = max(4, round(mask.size * .001))
+        components = [(int(stats[label, cv2.CC_STAT_AREA]), label)
+                      for label in range(1, count) if stats[label, cv2.CC_STAT_AREA] >= minimum]
+        components.sort(reverse=True)
+        result = [(labels == label) for _, label in components[:max_objects]]
+        # The selected candidate was already nonempty. Retaining it as one object is
+        # safer than producing no tracker when every piece is below the noise threshold.
+        return result or [mask]
 
     def predict(self, video, output, config, parent=None, frame_range=None, progress=None,
                 approved_keyframes=None):
@@ -117,7 +136,7 @@ class SAM3Backend:
         from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults
         from muggled_sam.demo_helpers.shared_ui_layout import make_hires_mask_uint8
         import shutil
-        memory = SAMVideoObjectResults.create(config['max_memories'], config['max_pointers'], 32)
+        memories = []
         start, end = frame_range if frame_range else (0, None)
         actual_prompts = []
         count = 0
@@ -136,19 +155,30 @@ class SAM3Backend:
                 if index in prompt_frames:
                     selected = self.torch.from_numpy(np.load(approved_keyframes[index], allow_pickle=False))
                     selected = selected.to(device=encoded[0].device)
-                    memory.store_prompt_result(index, self.model.initialize_from_mask(encoded, selected))
-                    memory.prevframe_buffer.clear()
-                    mask = make_hires_mask_uint8(selected, frame.shape[:2])
+                    candidate = make_hires_mask_uint8(selected, frame.shape[:2]) > 0
+                    components = self.split_tracking_masks(candidate, config['max_tracking_objects'])
+                    if not memories:
+                        memories = [SAMVideoObjectResults.create(config['max_memories'], config['max_pointers'], 32)
+                                    for _ in components]
+                    # Subsequent keyframes re-prompt each extant object. If the detector
+                    # joins objects during an occlusion, keep unmatched trackers intact.
+                    for memory, component in zip(memories, components):
+                        memory.store_prompt_result(index, self.model.initialize_from_mask(encoded, component))
+                        memory.prevframe_buffer.clear()
+                    mask = np.zeros(frame.shape[:2], dtype='uint8')
+                    for component in components:
+                        mask[component] = 255
                     actual_prompts.append(index)
                 else:
-                    if not memory.check_has_prompts():
+                    if not memories or not all(memory.check_has_prompts() for memory in memories):
                         raise ValueError('The first processed frame must be a prompt frame')
-                    score, best, masks, enc, ptr = self.model.step_video_masking(encoded, **memory.to_dict())
-                    mask = make_hires_mask_uint8(masks[0, int(best.item())], frame.shape[:2])
-                    if float(score.item()) >= config['object_score_threshold']:
-                        memory.store_frame_result(index, enc, ptr)
-                    else:
-                        mask[:] = 0
+                    mask = np.zeros(frame.shape[:2], dtype='uint8')
+                    for memory in memories:
+                        score, best, masks, enc, ptr = self.model.step_video_masking(encoded, **memory.to_dict())
+                        component = make_hires_mask_uint8(masks[0, int(best.item())], frame.shape[:2])
+                        if float(score.item()) >= config['object_score_threshold']:
+                            memory.store_frame_result(index, enc, ptr)
+                            mask = cv2.bitwise_or(mask, component)
                 bgra = cv2.cvtColor(frame, cv2.COLOR_BGR2BGRA)
                 bgra[:, :, 3] = mask
                 write_png(target, bgra)
@@ -160,7 +190,7 @@ class SAM3Backend:
             raise ValueError('frame_range exceeds decoded video length')
         if prompt_frames - set(range(count)):
             raise ValueError('prompt_frames exceed decoded video length')
-        return actual_prompts
+        return dict(prompt_frames=actual_prompts, tracking_object_count=len(memories))
 
 
 def mask_metrics(mask, previous=None):

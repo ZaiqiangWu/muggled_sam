@@ -46,6 +46,9 @@ class Service:
             if job['status'] in ('queued','running'):
                 job.update(status='failed', error='Server restarted during inference; submit a retry')
             for attempt in job.get('attempts',[]):
+                if isinstance(attempt, dict) and isinstance(attempt.get('config'), dict):
+                    # Existing jobs preserve their single-object behaviour on retry.
+                    attempt['config'].setdefault('max_tracking_objects', 1)
                 if isinstance(attempt, dict) and attempt.get('status') in ('queued','running'):
                     attempt.update(status='failed', error=job['error'])
             self.jobs[job['job_id']] = job
@@ -239,6 +242,7 @@ class Service:
     def submit(self, video_path, text_prompt, output_dir=None, top_k=8, random_check_frames=4,
                max_retry=2, prompt_frames=None, candidate_rank=0, score_threshold=.0,
                max_memories=6, max_pointers=15, object_score_threshold=.0,
+               max_tracking_objects=3,
                input_location='ubuntu', output_location='ubuntu'):
         if input_location != 'ubuntu':
             raise ValueError('Mac videos must live on the server: POST the file to /upload (or place it '
@@ -251,7 +255,8 @@ class Service:
         config = dict(text_prompt=text_prompt, prompt_frames=sorted(set(prompt_frames or [0])),
                       candidate_rank=candidate_rank, score_threshold=score_threshold,
                       max_memories=max_memories, max_pointers=max_pointers,
-                      object_score_threshold=object_score_threshold)
+                      object_score_threshold=object_score_threshold,
+                      max_tracking_objects=max_tracking_objects)
         self.validate(config, 0)
         if not 1 <= top_k <= 100 or not 0 <= random_check_frames <= 100:
             raise ValueError('top_k must be 1..100; random_check_frames must be 0..100')
@@ -280,6 +285,8 @@ class Service:
             raise ValueError('candidate_rank must be 0..3; score_threshold must be 0..1')
         if not 1 <= config['max_memories'] <= 32 or not 1 <= config['max_pointers'] <= 64:
             raise ValueError('Invalid memory/pointer history limits')
+        if type(config['max_tracking_objects']) is not int or not 1 <= config['max_tracking_objects'] <= 3:
+            raise ValueError('max_tracking_objects must be an integer in 1..3')
 
     def launch(self, job, config, frame_range, reason):
         index = len(job['attempts'])
@@ -345,16 +352,20 @@ class Service:
             parent = None
             if attempt['parent_attempt'] is not None:
                 parent = Path(job['attempts'][attempt['parent_attempt']]['directory'])/'rgba'
-            actual = self.backend.predict(job['video_path'], directory/'rgba', attempt['config'],
-                                          parent, attempt['frame_range'], progress,
-                                          approved_keyframes={k['frame']: directory/'keyframes'/f"{k['frame']:08d}.npy"
-                                                              for k in attempt['keyframes']})
+            prediction = self.backend.predict(job['video_path'], directory/'rgba', attempt['config'],
+                                              parent, attempt['frame_range'], progress,
+                                              approved_keyframes={k['frame']: directory/'keyframes'/f"{k['frame']:08d}.npy"
+                                                                  for k in attempt['keyframes']})
+            # Accept the previous adapter return type so old test/custom adapters remain usable.
+            actual = prediction['prompt_frames'] if isinstance(prediction, dict) else prediction
+            object_count = prediction.get('tracking_object_count', 1) if isinstance(prediction, dict) else 1
             seams = []
             if attempt['frame_range']:
                 seams = [i+d for i in attempt['frame_range'] for d in (-1,0,1)]
             report = analyze(job['video_path'], directory, job['top_k'], job['random_check_frames'], [*seams, *actual])
             with self.lock:
                 attempt.update(status='awaiting_visual_review', actual_prompt_frames=actual,
+                    tracking_object_count=object_count,
                     rgba_dir=str(directory/'rgba'), overlay_path=str(directory/'overlay.mp4'),
                     analysis_path=str(directory/'analysis.json'),
                     preview_paths=[str(directory/'previews'/f'{i:08d}.png') for i in report['preview_frames']],
@@ -427,6 +438,7 @@ class Service:
             preferred = panel or next(record for record in records if record['selected'])
             result = dict(job_id=job_id, attempt_index=attempt_index, frame=frame,
                           selected_candidate_rank=attempt['config']['candidate_rank'],
+                          tracking_components=keyframe.get('tracking_components', []),
                           preferred_preview=dict(path=preferred['path'], download_url=preferred['download_url']),
                           comparison_panel=panel, candidates=records,
                           next_step='Resolve download_url against the MCP server origin; HTTP-download the panel '
@@ -512,7 +524,7 @@ class Service:
         return self.result(job_id)
 
     def retry(self, job_id, reason, text_prompt=None, prompt_frames=None, frame_range=None,
-              candidate_rank=None):
+              candidate_rank=None, max_tracking_objects=None):
         with self.lock:
             job = self.get(job_id)
             if job['status'] not in ('needs_retry','failed'):
@@ -526,6 +538,8 @@ class Service:
                 config['text_prompt'] = text_prompt
             if candidate_rank is not None:
                 config['candidate_rank'] = candidate_rank
+            if max_tracking_objects is not None:
+                config['max_tracking_objects'] = max_tracking_objects
             start = 0
             if frame_range is not None:
                 if job['best_attempt'] is None:
@@ -597,7 +611,8 @@ def build_server(args):
                       top_k: int = 8, random_check_frames: int = 4, max_retry: int = 2,
                       prompt_frames: list[int] | None = None, candidate_rank: int = 0,
                       score_threshold: float = 0.0, max_memories: int = 6, max_pointers: int = 15,
-                      object_score_threshold: float = 0.0, input_location: str = 'ubuntu',
+                      object_score_threshold: float = 0.0, max_tracking_objects: int = 3,
+                      input_location: str = 'ubuntu',
                       output_location: str = 'ubuntu') -> dict:
         """Submit SAM3 -> RGBA -> temporal QA -> overlay/previews; returns job_id
         immediately. Inference runs in the background on one serialized GPU queue
@@ -611,6 +626,10 @@ def build_server(args):
         an absolute path inside a configured --input-root; never base64-encode videos or
         transfer them via SSH/SCP/SFTP. output_dir is always Ubuntu staging storage.
         output_location=mac requests an archive for subsequent download, not a Mac path.
+        max_tracking_objects (1..3, default 3) splits the selected, reviewed keyframe
+        mask into its largest disconnected components. Each component has independent
+        tracking memory and their masks are merged into the final RGBA output; use 1
+        to retain one-object tracking.
         First inspect EVERY keyframe using get_keyframe_preview and submit_keyframe_review.
         Tracking waits until all keyframes pass; rejected candidates require rerun_segmentation.
         Then continue by viewing ALL previews and submitting visual review; never infer visual
@@ -687,13 +706,16 @@ def build_server(args):
     @mcp.tool()
     def rerun_segmentation(job_id: str, reason: str, text_prompt: str | None = None,
                            prompt_frames: list[int] | None = None, frame_range: list[int] | None = None,
-                           candidate_rank: int | None = None) -> dict:
-        """Bounded retry after keyframe/video visual rejection or failure. Change text, candidate rank or key frames.
+                           candidate_rank: int | None = None,
+                           max_tracking_objects: int | None = None) -> dict:
+        """Bounded retry after keyframe/video visual rejection or failure. Change text, candidate rank,
+        key frames, or max_tracking_objects (1..3).
         Inclusive frame_range optionally reruns only that interval and copies all other
         RGBA frames from best attempt. Tracking is reinitialized at range start; inspect
         temporal seams in the new full-video QA. max_retry is enforced across all attempts.
         """
-        return service.retry(job_id,reason,text_prompt,prompt_frames,frame_range,candidate_rank)
+        return service.retry(job_id,reason,text_prompt,prompt_frames,frame_range,candidate_rank,
+                             max_tracking_objects)
 
     @mcp.tool()
     def package_result(job_id: str) -> dict:

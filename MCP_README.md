@@ -4,6 +4,8 @@
 
 本实现复用 `my_readme.md` 对应代码中的 `make_sam_from_state_dict`、`make_detector_model`、`initialize_from_mask`、`SAMVideoObjectResults`、`step_video_masking` 和 `make_hires_mask_uint8`。不调用会创建 UI 的顶层脚本，不加载外部 prompt pickle。单个文本目标；同一文本匹配多个对象时，通过置信度排序的 `candidate_rank=0..3` 选择实例，然后必须目视确认身份。默认使用与交互脚本相同的非空候选过滤和 2048 square encoding。
 
+当一个已审核 keyframe candidate 含有互不相连的部分（例如帽子、上衣和围巾），`max_tracking_objects` 默认取 `3`：服务保留面积最大的最多三个连通组件，为每个组件创建独立 tracking memory，逐帧独立跟踪，最后对其 alpha mask 取并集写入 RGBA。`1` 会关闭拆分，`2`/`3` 限制 object 数量；面积低于图像约 0.1%（至少 4 像素）的碎片不会变成 tracker。此处的“分别给 prompt”是将每个连通组件作为独立 **mask prompt** 提交给 SAM3 的 `initialize_from_mask`，不是再次用相同文字检测。keyframe 返回的 `tracking_components` 会列出最终 object 索引和面积。
+
 ## Ubuntu HPC 启动
 
 先按 `my_readme.md` 建立 Python 3.12 / SAM3 环境，按集群 CUDA 实际版本安装兼容的 torch / torchvision，再安装：
@@ -67,7 +69,7 @@ curl --fail --show-error \
 1. `segment_video`：提交后立即返回 `job_id`，不阻塞 HTTP 请求；分割在后台异步执行。多任务可以同时提交，但 GPU 推理走同一 worker 队列串行（同一时刻只有一个 SAM3 推理，避免显存抢占）。
 
 ```json
-{"video_path":"UPLOADED_FILE_ID/input.mp4","text_prompt":"quilted jacket","output_location":"mac","top_k":8,"random_check_frames":4,"max_retry":2,"prompt_frames":[0],"candidate_rank":0}
+{"video_path":"UPLOADED_FILE_ID/input.mp4","text_prompt":"hat and jacket","output_location":"mac","top_k":8,"random_check_frames":4,"max_retry":2,"prompt_frames":[0],"candidate_rank":0,"max_tracking_objects":3}
 ```
 
 2. 先审核全部 keyframe：轮询 `get_job_status`，当 `internal_status="awaiting_keyframe_review"`（对外 `status="running"`）时，按 `pending_keyframes` 逐帧调用下面两个工具。`attempt_index` 使用当前 attempt 的序号，可从 `get_job_status.attempt` 或 `get_segmentation` 获取。
