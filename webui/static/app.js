@@ -316,11 +316,31 @@ function updateInfoFromDisplay(res) {
   appendLog(res.log);
 }
 
+// Keep the 2x2 mask grid exactly the same size (and thus aspect ratio) as the video.
+// Deterministic: width = min(video natural width, (row width - gap) / 2); the grid
+// height follows via flex stretch. No ResizeObserver feedback loop on the canvas.
+function syncMaskGridSize() {
+  const row = $("video-row");
+  const canvasWrap = $("canvas-wrap");
+  const previews = $("previews");
+  if (!row || !canvasWrap || !previews) return;
+  if (!state.open || frameCanvas.width < 2) {
+    canvasWrap.style.width = "";
+    previews.style.width = "";
+    return;
+  }
+  const gap = 8; // must match #video-row gap in style.css
+  const naturalW = frameCanvas.width; // buffer px == natural rendered width
+  const w = Math.round(Math.min(naturalW, (row.clientWidth - gap) / 2));
+  canvasWrap.style.width = w + "px";
+  previews.style.width = w + "px";
+}
+
 function renderDisplay(res) {
   drawImageB64(frameCanvas, res.frame_b64).then(() => {
     overlayCanvas.width = frameCanvas.width;
     overlayCanvas.height = frameCanvas.height;
-    $("previews").style.aspectRatio = frameCanvas.width + " / " + frameCanvas.height;
+    syncMaskGridSize();
     drawOverlay();
   });
   setPreviews(res.previews_b64);
@@ -844,6 +864,7 @@ async function closeVideo() {
     fctx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
     octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     $("status-banner").textContent = "";
+    syncMaskGridSize();
     pollStatus();
   });
 }
@@ -908,6 +929,7 @@ function wire() {
   document.querySelectorAll(".preview-slot").forEach((el, i) => {
     el.onclick = () => selectMask(i).catch((e) => toast(e.message, true));
   });
+  new ResizeObserver(() => syncMaskGridSize()).observe($("video-row"));
 
   // buffers
   $("btn-save-buffer").onclick = saveBuffer;

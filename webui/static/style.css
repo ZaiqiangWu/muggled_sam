@@ -112,7 +112,7 @@ html, body {
   grid-template-rows: 1fr 1fr;
   gap: 6px;
   flex: 0 0 auto;
-  aspect-ratio: 16 / 9; /* fallback; app.js overrides with the actual frame ratio */
+  aspect-ratio: 16 / 9; /* pre-open fallback; app.js sets an explicit px width while a video is open */
   max-width: 100%;
 }
 
