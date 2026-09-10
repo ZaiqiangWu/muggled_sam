@@ -40,7 +40,10 @@
 #python load_prompts_run_dir.py --prompt_path ./tracking_states/vneck_knit_open.pt --input_dir ./videos/vneck_knit_open/
 
 #python load_prompts_run_dir.py --prompt_path ./pl0.pt --input_dir ./videos/pl0/
-python load_prompts_run_video.py --prompt_path ./pl0_02.pt --input_video ./videos/pl0/pl0_02.mp4
+#python load_prompts_run_video.py --prompt_path ./pl0_02.pt --input_video ./videos/pl0/pl0_02.mp4
+python load_prompts_run_dir.py --prompt_path ./videos/doll1/doll1_00.pt  --input_dir ./videos/doll1/
+python load_prompts_run_dir.py --prompt_path ./videos/doll2/doll2_00.pt  --input_dir ./videos/doll2/
+python load_prompts_run_dir.py --prompt_path ./videos/doll3/doll3_00.pt  --input_dir ./videos/doll3/
 
 
 
