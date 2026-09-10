@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Muggled SAM - Web UI</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Header info bar (hidden when 'hide info' is on) -->
+  <header id="header" class="msgbar">
+    <span id="hdr-model" class="hdr-item">-</span>
+    <span id="hdr-tokens" class="hdr-item">-</span>
+    <span id="hdr-device" class="hdr-item">-</span>
+    <span id="hdr-video" class="hdr-item hdr-path"></span>
+  </header>
+
+  <main id="main">
+    <!-- ======================= Stage (video display) ======================= -->
+    <section id="stage">
+      <div id="canvas-wrap">
+        <canvas id="frame-canvas" width="900" height="506"></canvas>
+        <canvas id="overlay-canvas" width="900" height="506"></canvas>
+        <div id="status-banner"></div>
+      </div>
+
+      <!-- Mask preview buttons (4 predictions), like the script's mask UI -->
+      <div id="previews">
+        <div class="preview-slot" title="Mask 1 (blank)"><canvas id="prev0" width="128" height="128"></canvas><span>1</span></div>
+        <div class="preview-slot selected" title="Mask 2"><canvas id="prev1" width="128" height="128"></canvas><span>2</span></div>
+        <div class="preview-slot" title="Mask 3"><canvas id="prev2" width="128" height="128"></canvas><span>3</span></div>
+        <div class="preview-slot" title="Mask 4"><canvas id="prev3" width="128" height="128"></canvas><span>4</span></div>
+      </div>
+
+      <!-- Value blocks, like the script's text UI -->
+      <div id="infobar" class="msgbar">
+        <span id="vram-text">VRAM: -</span>
+        <span id="score-text">Score: -</span>
+        <span id="frame-text">Frame: -</span>
+        <span id="prompts-text">Prompts: 0</span>
+        <span id="history-text">History: 0</span>
+      </div>
+
+      <!-- Text prompt status (SAM3) -->
+      <div id="text-status"></div>
+    </section>
+
+    <!-- ======================= Control panel ======================= -->
+    <aside id="panel">
+      <div class="row">
+        <button id="btn-open" class="primary">Open</button>
+        <button id="btn-save" class="primary">Save</button>
+        <button id="btn-close" class="danger" disabled>Close</button>
+      </div>
+
+      <!-- Playback -->
+      <fieldset>
+        <legend>Playback</legend>
+        <div class="row">
+          <button id="btn-seek0" title="Seek to start">&#x23EE;</button>
+          <button id="btn-step-back" title="Step backward">&#x23EA;</button>
+          <button id="btn-play" title="Play / Pause (Track)">&#x25B6;</button>
+          <button id="btn-step-fwd" title="Step forward">&#x23E9;</button>
+          <button id="btn-sekend" title="Seek to end">&#x23ED;</button>
+          <button id="btn-reverse" title="Reverse playback (r)">&#x2194; Reverse</button>
+        </div>
+        <input type="range" id="seek-slider" min="0" max="1000" value="0" disabled>
+      </fieldset>
+
+      <!-- Tools -->
+      <fieldset>
+        <legend>Tools (arrow keys left/right)</legend>
+        <div class="row wrap">
+          <button id="tool-hover" class="tool selected">Hover</button>
+          <button id="tool-box" class="tool">Box</button>
+          <button id="tool-fg" class="tool">FG Point</button>
+          <button id="tool-bg" class="tool">BG Point</button>
+          <button id="tool-crop" class="tool" style="display:none">Crop</button>
+          <button id="tool-clear" class="tool danger">Clear</button>
+        </div>
+        <div id="tool-hint" class="hint">Click to place a foreground point (switches to FG tool)</div>
+      </fieldset>
+
+      <!-- Prompt actions -->
+      <fieldset>
+        <legend>Prompts</legend>
+        <div class="row wrap">
+          <button id="btn-store" class="accent">Store Prompt</button>
+          <button id="btn-clear-prompts">Clear Prompts</button>
+          <button id="btn-clear-history">Clear History</button>
+        </div>
+        <div class="row wrap toggles">
+          <label><input type="checkbox" id="tgl-preview"> Preview</label>
+          <label><input type="checkbox" id="tgl-invert"> Invert</label>
+          <label><input type="checkbox" id="tgl-history" checked> Enable History</label>
+          <label><input type="checkbox" id="tgl-record"> Enable Recording</label>
+        </div>
+      </fieldset>
+
+      <!-- Buffers / recording -->
+      <fieldset id="buffer-fieldset">
+        <legend>Buffers (v / b keys) - Buffered Mask Data (MB)</legend>
+        <div class="row wrap" id="buffer-row"></div>
+        <div class="row">
+          <button id="btn-save-buffer">Save Buffer</button>
+          <button id="btn-clear-buffer">Clear Buffer</button>
+        </div>
+      </fieldset>
+
+      <!-- Text prompts (SAM3 only) -->
+      <fieldset id="text-fieldset" style="display:none">
+        <legend>Text Prompt (SAM3)</legend>
+        <div class="row">
+          <input type="text" id="text-input" placeholder="e.g. person in a spacesuit" size="24">
+          <button id="btn-text-set">Set Text Prompt</button>
+          <button id="btn-text-reuse">Reuse Text Prompt</button>
+        </div>
+        <div class="hint">Shows up to 4 candidates - select one above, then click Store Prompt</div>
+      </fieldset>
+
+      <!-- Crop (only when the crop setting is enabled) -->
+      <fieldset id="crop-fieldset" style="display:none">
+        <legend>Crop</legend>
+        <div class="row">
+          <button id="btn-crop-apply">Apply Crop</button>
+          <button id="btn-crop-reset">Reset to Full</button>
+        </div>
+        <div class="hint">Use the Crop tool to drag a rectangle on the frame</div>
+      </fieldset>
+
+      <!-- Settings (mirrors the script's command-line parameters) -->
+      <details id="settings">
+        <summary>Settings (script parameters)</summary>
+        <div class="settings-grid">
+          <label>Model path (-m)<input type="text" id="cfg-model_path" placeholder="./model_weights/sam3.pt"></label>
+          <label>Image path (-i, unused for video)<input type="text" id="cfg-image_path"></label>
+          <label>Device (-d)<input type="text" id="cfg-device" placeholder="cpu / cuda / mps"></label>
+          <label>Display size (-s)<input type="number" id="cfg-display_size" value="900" min="100" max="10000"></label>
+          <label>Base size px (-b)<input type="number" id="cfg-base_size_px" value="2048" min="128" step="128"></label>
+          <label>Num buffers (-n)<input type="number" id="cfg-num_buffers" value="4" min="1" max="16"></label>
+          <label>Max memories<input type="number" id="cfg-max_memories" value="6" min="0" max="64"></label>
+          <label>Max pointers<input type="number" id="cfg-max_pointers" value="15" min="0" max="128"></label>
+          <label>Object score threshold<input type="number" id="cfg-objscore_threshold" value="0" step="0.05" min="-1" max="1"></label>
+          <label>Background color (-bg)<input type="text" id="cfg-bg_color_hex" value="ff00ff00" placeholder="RGB / RGBA hex"></label>
+          <label>FFmpeg path (--ffmpeg)<input type="text" id="cfg-ffmpeg" placeholder="leave empty to save tarfiles"></label>
+          <div class="checks">
+            <label><input type="checkbox" id="cfg-use_float32"> Use float32 (-f32)</label>
+            <label><input type="checkbox" id="cfg-use_aspect_ratio" checked> Use aspect ratio (-ar)</label>
+            <label><input type="checkbox" id="cfg-keep_bad_objscores"> Keep bad objscores</label>
+            <label><input type="checkbox" id="cfg-keep_history_on_new_prompts" checked> Keep history on new prompts</label>
+            <label><input type="checkbox" id="cfg-hide_info"> Hide info (--hide_info)</label>
+            <label><input type="checkbox" id="cfg-use_webcam"> Use webcam (-cam)</label>
+            <label><input type="checkbox" id="cfg-disable_save"> Disable save (-nosave)</label>
+            <label><input type="checkbox" id="cfg-crop"> Enable crop (--crop)</label>
+          </div>
+        </div>
+        <div class="row">
+          <button id="btn-settings-apply" class="accent">Apply Settings</button>
+          <span class="hint">model/device/float32/buffers changes need a re-Open</span>
+        </div>
+      </details>
+
+      <!-- Server log -->
+      <div id="log" class="log"></div>
+    </aside>
+  </main>
+
+  <!-- Footer key help (hidden when 'hide info' is on) -->
+  <footer id="footer" class="msgbar">
+    <span>[space] Play/Pause</span>
+    <span>[p] Preview</span>
+    <span>[i] Invert</span>
+    <span>[v/b] Buffers</span>
+    <span>[tab] Store Prompt</span>
+    <span>[r] Reverse</span>
+    <span>[&larr;&rarr;] Tools / [&uarr;&darr;] Masks</span>
+    <span>[= / -] Zoom</span>
+    <span>[g] Save state</span>
+    <span>[q] Close &amp; save</span>
+  </footer>
+
+  <!-- ======================= Open (file browser) dialog ======================= -->
+  <div id="open-dialog" class="modal" style="display:none">
+    <div class="modal-card">
+      <h2>Open video file (on this server)</h2>
+      <div class="row">
+        <input type="text" id="dir-input" size="48">
+        <button id="btn-dir-refresh">Refresh</button>
+        <label class="checks-inline"><input type="checkbox" id="open-webcam"> webcam</label>
+      </div>
+      <div id="dir-list" class="dir-list"></div>
+      <div class="row modal-actions">
+        <span id="dir-selected" class="hint">no file selected</span>
+        <span class="spacer"></span>
+        <button id="btn-dir-cancel">Cancel</button>
+        <button id="btn-dir-open" class="primary">Open</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading overlay (model load / heavy ops) -->
+  <div id="loading" style="display:none">
+    <div class="loading-card"><div class="spinner"></div><div id="loading-text">Loading...</div></div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" style="display:none"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
