@@ -99,11 +99,18 @@ html, body {
   line-height: 1.2;
 }
 
-/* ---------- mask previews ---------- */
-#previews {
+/* ---------- mask previews (2x2 grid, right of the video) ---------- */
+#video-row {
   display: flex;
   gap: 8px;
-  width: fit-content;
+  align-items: flex-start;
+}
+
+#previews {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
 .preview-slot {

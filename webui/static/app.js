@@ -120,7 +120,10 @@ function drawImageB64Png(canvas, b64) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      // size the canvas to the image so the mask keeps its aspect ratio
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext("2d").drawImage(img, 0, 0);
       resolve();
     };
     img.onerror = () => resolve();

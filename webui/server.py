@@ -169,10 +169,20 @@ def b64_jpeg(image_bgr, quality=90):
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
-def b64_png_gray(image_gray, scale=None):
-    """Encode a single-channel numpy image to a base64 PNG string."""
-    if scale is not None:
-        image_gray = cv2.resize(image_gray, dsize=scale, interpolation=cv2.INTER_NEAREST)
+def b64_png_gray(image_gray, max_side_length=None):
+    """Encode a single-channel numpy image to a base64 PNG string.
+
+    If max_side_length is given, the image is downscaled so that its longest
+    side matches it, preserving the original aspect ratio.
+    """
+    if max_side_length is not None:
+        img_h, img_w = image_gray.shape[0:2]
+        longest = max(img_h, img_w)
+        if longest > max_side_length:
+            scale = max_side_length / longest
+            new_w = max(1, int(round(img_w * scale)))
+            new_h = max(1, int(round(img_h * scale)))
+            image_gray = cv2.resize(image_gray, dsize=(new_w, new_h), interpolation=cv2.INTER_NEAREST)
     ok, buf = cv2.imencode(".png", image_gray)
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
@@ -1318,8 +1328,8 @@ class Session:
             preds_uint8 = np.zeros((4, 1, 1), dtype=np.uint8)
         if self.invert_mask:
             preds_uint8 = np.bitwise_not(preds_uint8)
-        target = 128
-        return [b64_png_gray(preds_uint8[i], scale=(target, target)) for i in range(4)]
+        target = 160  # longest side of each preview; aspect ratio preserved
+        return [b64_png_gray(preds_uint8[i], max_side_length=target) for i in range(4)]
 
     def display_payload(self):
         """Build the JSON payload for a display update (image + previews + state).

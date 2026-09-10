@@ -18,18 +18,20 @@
   <main id="main">
     <!-- ======================= Stage (video display) ======================= -->
     <section id="stage">
-      <div id="canvas-wrap">
-        <canvas id="frame-canvas" width="900" height="506"></canvas>
-        <canvas id="overlay-canvas" width="900" height="506"></canvas>
-        <div id="status-banner"></div>
-      </div>
+      <div id="video-row">
+        <div id="canvas-wrap">
+          <canvas id="frame-canvas" width="900" height="506"></canvas>
+          <canvas id="overlay-canvas" width="900" height="506"></canvas>
+          <div id="status-banner"></div>
+        </div>
 
-      <!-- Mask preview buttons (4 predictions), like the script's mask UI -->
-      <div id="previews">
-        <div class="preview-slot" title="Mask 1 (blank)"><canvas id="prev0" width="128" height="128"></canvas><span>1</span></div>
-        <div class="preview-slot selected" title="Mask 2"><canvas id="prev1" width="128" height="128"></canvas><span>2</span></div>
-        <div class="preview-slot" title="Mask 3"><canvas id="prev2" width="128" height="128"></canvas><span>3</span></div>
-        <div class="preview-slot" title="Mask 4"><canvas id="prev3" width="128" height="128"></canvas><span>4</span></div>
+        <!-- Mask preview buttons (4 predictions), like the script's mask UI -->
+        <div id="previews">
+          <div class="preview-slot" title="Mask 1 (blank)"><canvas id="prev0" width="160" height="90"></canvas><span>1</span></div>
+          <div class="preview-slot selected" title="Mask 2"><canvas id="prev1" width="160" height="90"></canvas><span>2</span></div>
+          <div class="preview-slot" title="Mask 3"><canvas id="prev2" width="160" height="90"></canvas><span>3</span></div>
+          <div class="preview-slot" title="Mask 4"><canvas id="prev3" width="160" height="90"></canvas><span>4</span></div>
+        </div>
       </div>
 
       <!-- Value blocks, like the script's text UI -->
