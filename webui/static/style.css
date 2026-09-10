@@ -103,14 +103,17 @@ html, body {
 #video-row {
   display: flex;
   gap: 8px;
-  align-items: flex-start;
+  align-items: stretch; /* the 2x2 grid stretches to the video's height */
 }
 
 #previews {
   display: grid;
-  grid-template-columns: repeat(2, max-content);
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
   gap: 6px;
   flex: 0 0 auto;
+  aspect-ratio: 1 / 1;  /* square: width follows the stretched (video) height */
+  max-width: 45%;
 }
 
 .preview-slot {
@@ -120,10 +123,22 @@ html, body {
   cursor: pointer;
   line-height: 0;
   background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
 }
 
 .preview-slot.selected { border-color: var(--accent); }
-.preview-slot canvas { display: block; }
+.preview-slot canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;        /* fill the slot, keep the mask's aspect ratio */
+  image-rendering: pixelated;
+}
 .preview-slot span {
   position: absolute;
   bottom: 2px; right: 4px;

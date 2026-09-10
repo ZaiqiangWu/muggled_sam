@@ -903,6 +903,11 @@ function wire() {
   $("tgl-history").onchange = (e) => toggleUI("history").catch((err) => { e.target.checked = !e.target.checked; toast(err.message, true); });
   $("tgl-record").onchange = (e) => toggleUI("record").catch((err) => { e.target.checked = !e.target.checked; toast(err.message, true); });
 
+  // mask preview slots
+  document.querySelectorAll(".preview-slot").forEach((el, i) => {
+    el.onclick = () => selectMask(i).catch((e) => toast(e.message, true));
+  });
+
   // buffers
   $("btn-save-buffer").onclick = saveBuffer;
   $("btn-clear-buffer").onclick = () =>

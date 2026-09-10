@@ -1328,7 +1328,7 @@ class Session:
             preds_uint8 = np.zeros((4, 1, 1), dtype=np.uint8)
         if self.invert_mask:
             preds_uint8 = np.bitwise_not(preds_uint8)
-        target = 160  # longest side of each preview; aspect ratio preserved
+        target = 320  # longest side of each preview; aspect ratio preserved
         return [b64_png_gray(preds_uint8[i], max_side_length=target) for i in range(4)]
 
     def display_payload(self):
