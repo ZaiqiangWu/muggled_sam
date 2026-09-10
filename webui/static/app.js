@@ -318,21 +318,26 @@ function updateInfoFromDisplay(res) {
 }
 
 // Keep the 2x2 mask grid exactly the same size (and thus aspect ratio) as the video.
-// Deterministic: width = min(video natural width, (row width - gap) / 2); the grid
-// height follows via flex stretch. No ResizeObserver feedback loop on the canvas.
+// Deterministic: width = min(video natural width, (available stage width - gap) / 2),
+// where the stage now shrink-fits the video+grid so the control panel sits flush
+// against the grid. The available width is measured on #main (not the row) so the
+// layout always uses the maximum size that fits, without a feedback loop.
 function syncMaskGridSize() {
-  const row = $("video-row");
+  const main = $("main");
+  const panel = $("panel");
   const canvasWrap = $("canvas-wrap");
   const previews = $("previews");
-  if (!row || !canvasWrap || !previews) return;
+  if (!main || !panel || !canvasWrap || !previews) return;
   if (!state.open || frameCanvas.width < 2) {
     canvasWrap.style.width = "";
     previews.style.width = "";
     return;
   }
-  const gap = 8; // must match #video-row gap in style.css
+  const gap = 8;   // must match #video-row gap in style.css
+  const mainPad = 20; // must match #main left+right padding in style.css
+  const avail = main.clientWidth - panel.clientWidth - mainPad;
   const naturalW = frameCanvas.width; // buffer px == natural rendered width
-  const w = Math.round(Math.min(naturalW, (row.clientWidth - gap) / 2));
+  const w = Math.round(Math.min(naturalW, (avail - gap) / 2));
   canvasWrap.style.width = w + "px";
   previews.style.width = w + "px";
 }

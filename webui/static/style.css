@@ -26,13 +26,13 @@ html, body {
 /* ---------- layout ---------- */
 #main {
   display: flex;
-  gap: 10px;
+  gap: 0; /* control panel sits flush against the 2x2 mask grid */
   padding: 10px;
   align-items: flex-start;
 }
 
 #stage {
-  flex: 1 1 auto;
+  flex: 0 1 auto; /* shrink to the video+grid content so the panel butts up against it */
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -157,6 +157,8 @@ html, body {
   color: var(--accent2);
   font-size: 12px;
   min-height: 16px;
+  width: 0;       /* must not widen the shrink-to-fit stage via long text */
+  min-width: 100%; /* still fills the stage width once it is resolved */
 }
 
 /* ---------- buttons & rows ---------- */
