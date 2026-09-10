@@ -39,7 +39,8 @@ const state = {
   zoom: 1.0,
   status: null,
   seenLog: [],
-  dirSelected: null,  // absolute path of selected file in the Open dialog
+  dirSelected: null,  // absolute path of selected entry (file or folder) in the Open dialog
+  dirSelectedIsDir: null,
 };
 
 // ------------------------------------------------------------------ helpers
@@ -647,6 +648,9 @@ overlayCanvas.addEventListener("click", (evt) => {
 
 async function loadDir(path) {
   const res = await api("/api/dirs?path=" + encodeURIComponent(path || ""));
+  // entering a (new) directory starts with no selection
+  state.dirSelected = null;
+  $("dir-selected").textContent = "no file selected";
   const list = $("dir-list");
   list.innerHTML = "";
 
@@ -654,19 +658,17 @@ async function loadDir(path) {
     const div = document.createElement("div");
     div.className = "dir-entry" + (isDir ? " dir" : " file");
     div.innerHTML = `<span class="icon">${icon}</span>${name}`;
-    if (!isDir && fullPath === state.dirSelected) div.classList.add("selected");
+    // single click: select (folder or file); double click: open (folder or file)
     div.onclick = () => {
-      if (isDir) {
-        loadDir(fullPath).catch((e) => toast(e.message, true));
-      } else {
-        state.dirSelected = fullPath;
-        list.querySelectorAll(".file.selected").forEach((el) => el.classList.remove("selected"));
-        div.classList.add("selected");
-        $("dir-selected").textContent = fullPath;
-      }
+      state.dirSelected = fullPath;
+      state.dirSelectedIsDir = isDir;
+      list.querySelectorAll(".dir-entry.selected").forEach((el) => el.classList.remove("selected"));
+      div.classList.add("selected");
+      $("dir-selected").textContent = fullPath;
     };
     div.ondblclick = () => {
-      if (!isDir) doOpen();
+      if (isDir) loadDir(fullPath).catch((e) => toast(e.message, true));
+      else doOpen();
     };
     list.appendChild(div);
   };
@@ -682,6 +684,7 @@ async function loadDir(path) {
 function openDialog() {
   $("open-dialog").style.display = "flex";
   state.dirSelected = null;
+  state.dirSelectedIsDir = null;
   $("dir-selected").textContent = "no file selected";
   const startPath = (state.status && state.status.video.path) ? state.status.video.path : "";
   loadDir(startPath ? startPath.replace(/\/[^/]*$/, "") : "").catch((e) => toast(e.message, true));
@@ -692,6 +695,11 @@ function closeDialog() {
 }
 
 async function doOpen() {
+  // a folder is selected: expand it in place (double-click equivalent), no error
+  if (state.dirSelected && state.dirSelectedIsDir) {
+    loadDir(state.dirSelected).catch((e) => toast(e.message, true));
+    return;
+  }
   closeDialog();
   await withBusy("Opening video & loading model (this can take a while)...", async () => {
     let res;

@@ -281,7 +281,7 @@ input[type="range"] { width: 100%; }
 }
 
 .dir-entry:hover { background: rgba(255,255,255,0.06); }
-.dir-entry.file.selected { background: var(--accent); color: #fff; }
+.dir-entry.selected { background: var(--accent); color: #fff; }
 .dir-entry .icon { display: inline-block; width: 20px; }
 
 /* ---------- loading overlay ---------- */
