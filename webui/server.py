@@ -302,6 +302,7 @@ class Session:
         self.vram_report = PeriodicVRAMReport(update_period_ms=2000)
         self.history = HistoryKeeper()
         self.is_open = False
+        self.last_error = None
         self.log = deque(maxlen=60)
 
     # ------------------------------------------------------------------ logging
@@ -1533,10 +1534,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._route_post(route, body)
             else:
                 self._send_json({"ok": False, "error": "Method not allowed"}, status=405)
+            self.session.last_error = None
         except BrokenPipeError:
             pass
         except Exception as err:  # noqa: BLE001
             traceback.print_exc()
+            self.session.last_error = str(err)
             try:
                 self._send_json({"ok": False, "error": str(err)}, status=500)
             except Exception:  # noqa: BLE001
