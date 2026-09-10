@@ -767,6 +767,8 @@ class Session:
                     f"({self.memory_list[buffer].get_num_memories()[0]} prompt frame(s) stored)."
                 )
             else:
+                if not self._have_user_prompts():
+                    raise ValueError("No prompts to store: draw a box / points first (or use a text prompt).")
                 _, init_mem, init_ptr = self.sammodel.initialize_video_masking(
                     self.encoded_img,
                     *self.prompts,

@@ -284,6 +284,12 @@ function updateInfoFromDisplay(res) {
   state.video.total_frames = res.total_frames;
   if (res.prompts) state.prompts = res.prompts;
 
+  // Store Prompt only makes sense with working prompts or a live text candidate
+  const hasStorablePrompt =
+    (!!res.prompts && res.prompts.boxes.length + res.prompts.fg.length + res.prompts.bg.length > 0) ||
+    state.status.has_text_preview;
+  $("btn-store").disabled = !hasStorablePrompt;
+
   const total = state.video.total_frames;
   $("frame-text").textContent = total > 1 ? `Frame: ${res.frame_idx}/${total}` : "Frame: (live)";
   $("score-text").textContent = `Score: ${res.score.toFixed(1)}`;
@@ -879,6 +885,7 @@ async function closeVideo() {
     fctx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
     octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     $("status-banner").textContent = "";
+    $("btn-store").disabled = true;
     syncMaskGridSize();
     pollStatus();
   });
