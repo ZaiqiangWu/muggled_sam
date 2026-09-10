@@ -383,6 +383,8 @@ class Session:
                 if video_path in (None, ""):
                     raise ValueError("No video path given (use the Open button)")
                 video_path = self._resolve_path(str(video_path))
+                if osp.isdir(video_path):
+                    raise IsADirectoryError(f"That is a folder, not a video file: {video_path}")
                 if not osp.isfile(video_path):
                     raise FileNotFoundError(f"Video file not found: {video_path}")
 
@@ -1434,6 +1436,8 @@ class Session:
                 "buffers": buffer_info,
                 "config": self.config_snapshot(),
                 "has_text_preview": self._text_preview_active(),
+                "text_draft": self.text_prompt_drafts_by_object.get(buffer),
+                "text_stored": self.text_prompts_by_object.get(buffer),
                 "crop": {
                     "enabled": self.cfg["crop"],
                     "tlbr_norm": self.crop_tlbr_norm,

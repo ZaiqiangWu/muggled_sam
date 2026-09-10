@@ -647,8 +647,8 @@ async function loadDir(path) {
 
   if (res.parent) addEntry("↰", ".. (up)", true, res.parent);
   for (const e of res.entries) {
-    const full = e.isDir ? (res.path + "/" + e.name) : (res.path + "/" + e.name);
-    addEntry(e.isDir ? "📁" : "🎬", e.name, e.isDir, full);
+    const isDir = e.is_dir === true;
+    addEntry(isDir ? "📁" : "🎬", e.name, isDir, res.path + "/" + e.name);
   }
   $("dir-input").value = res.path;
 }
