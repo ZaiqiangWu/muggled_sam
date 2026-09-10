@@ -8,8 +8,10 @@ A single-page web app that reproduces the functionality and parameters of
 - **Open button** replaces `--input_video xxx.mp4`: it opens an interactive
   file browser for files **on the server** running this page (not a local
   browser upload). A "webcam" checkbox covers `-cam`.
-- **Save button** saves `./saved_tracking_state.pt`
-  (in the script this happened automatically when the display window closed).
+- **Save button** saves `<video_stem>.pt` next to the video file
+  (e.g. `clip.mp4` -> `clip.pt`; webcam sessions fall back to
+  `./saved_tracking_state.pt`). In the script this happened automatically
+  when the display window closed.
 
 Everything else mirrors the script: the same model calls
 (`encode_image` / `encode_prompts` / `generate_masks` /
@@ -38,7 +40,7 @@ The server binds `0.0.0.0` by default, so any IP on the network can connect.
 exactly like in the script:
 
 - model weights: `./model_weights/sam3.pt` (override with `Model path` in Settings)
-- saved tracking state: `./saved_tracking_state.pt` (repo root)
+- saved tracking state: `<video_stem>.pt` next to the video file (webcam: `./saved_tracking_state.pt`)
 - saved buffer recordings: `./saved_images/run_video/...`
 
 ## Usage (mirrors the script's UI)
@@ -63,8 +65,9 @@ exactly like in the script:
    **Enable Recording** records the masked frames of tracked buffers into
    memory; **Save Buffer** writes them out (ffmpeg mp4 if an ffmpeg path is
    configured, otherwise a tarfile of PNGs), and **Clear Buffer** wipes them.
-6. **Save** (or `g`) writes `./saved_tracking_state.pt` with the tracking
-   state of every buffer that has prompts (plus their text prompts).
+6. **Save** (or `g`) writes `<video_stem>.pt` next to the video file with
+   the tracking state of every buffer that has prompts (plus their text
+   prompts).
    **Close** (`q`) saves state first, then releases the video — the same as
    quitting the script's window.
 

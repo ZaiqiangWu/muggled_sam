@@ -871,7 +871,7 @@ async function closeVideo() {
   stopPlayback();
   await withBusy("Closing video...", async () => {
     if (state.open) {
-      // Like the script: quitting the UI saves ./saved_tracking_state.pt (when prompts exist)
+      // Like the script: quitting the UI saves the tracking state (when prompts exist)
       try {
         const res = await api("/api/save_state", { method: "POST", body: {} });
         toast(`Saved: ${res.path}`);

@@ -10,7 +10,7 @@ in a web page served on port 8765 (bound to 0.0.0.0 so any IP can connect).
 Differences from the original script (per webui/task.md):
   * `--input_video xxx.mp4` is replaced by an interactive "Open" button that
     lets the user browse and pick a file on the server running this page.
-  * A "Save" button saves `./saved_tracking_state.pt`
+  * A "Save" button saves `<video_stem>.pt` next to the video file
     (in the script this happened automatically when the window closed).
 
 Run from the repository root:
@@ -93,8 +93,9 @@ DEFAULT_BG_COLOR_HEX = "ff00ff00"
 DEFAULT_FFMPEG = get_default_ffmpeg_command()
 
 # Relative paths are resolved against the repo root so that `./model_weights/sam3.pt`
-# works even if the server is launched from elsewhere. `saved_tracking_state.pt`
-# is written to the CWD (repo root) exactly like the original script.
+# works even if the server is launched from elsewhere. Tracking state is saved
+# next to the open video file, named after it (clip.mp4 -> clip.pt);
+# STATE_SAVE_PATH is only the fallback for webcam sessions.
 DEFAULT_MODEL_FILE = osp.join(_REPO_ROOT, "model_weights", "sam3.pt")
 STATE_SAVE_PATH = "saved_tracking_state.pt"
 
@@ -1239,7 +1240,8 @@ class Session:
     def save_state(self):
         """
         The 'Save' button. Mirrors the end-of-script block:
-        save ./saved_tracking_state.pt with the tracking state of all buffers
+        save <video_stem>.pt (next to the video file, webcam:
+        ./saved_tracking_state.pt) with the tracking state of all buffers
         that have prompts (plus their text prompts).
         """
         with self.lock:
@@ -1259,9 +1261,15 @@ class Session:
                 for objidx in save_data
                 if objidx in self.text_prompts_by_object
             }
-            torch.save(make_tracking_state(save_data, saved_text_prompts), STATE_SAVE_PATH)
-            self._log(f"Saved tracking state to {osp.abspath(STATE_SAVE_PATH)}")
-            return {"ok": True, "path": STATE_SAVE_PATH, "objects": sorted(save_data.keys())}
+            # Save next to the video file, named after it (clip.mp4 -> clip.pt);
+            # webcam sessions have no video file and fall back to the fixed name.
+            if self.video_path and osp.isfile(self.video_path):
+                save_path = osp.splitext(self.video_path)[0] + ".pt"
+            else:
+                save_path = STATE_SAVE_PATH
+            torch.save(make_tracking_state(save_data, saved_text_prompts), save_path)
+            self._log(f"Saved tracking state to {osp.abspath(save_path)}")
+            return {"ok": True, "path": save_path, "objects": sorted(save_data.keys())}
 
     # ------------------------------------------------------------------ rendering
 
@@ -1667,7 +1675,7 @@ def main():
 
     print(f"Web UI running at http://{args.host}:{args.port}/  (any IP can connect)")
     print(f"  Repo root: {_REPO_ROOT}")
-    print(f"  Saved tracking state will be written to: {osp.abspath(STATE_SAVE_PATH)}")
+    print(f"  Tracking state saves go next to the video file, named after it (webcam: {osp.abspath(STATE_SAVE_PATH)})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
