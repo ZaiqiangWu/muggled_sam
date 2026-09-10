@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Single-GPU SAM3 MCP server. Run inside the repository's SAM3 environment."""
 import argparse
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import copy
@@ -31,6 +32,7 @@ class Service:
         self.package_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='sam3-package')
         self.package_tasks = {}
         self.preview_locks = {}
+        self.closing = False
         self.jobs = {}
         for path in self.root.rglob('job.json'):
             try:
@@ -50,6 +52,14 @@ class Service:
 
     def save(self, job):
         write_json(Path(job['directory'])/'job.json', job)
+
+    def close(self):
+        with self.lock:
+            self.closing = True
+        try:
+            self.executor.shutdown(wait=True)
+        finally:
+            self.package_executor.shutdown(wait=True)
 
     def get(self, job_id):
         if job_id not in self.jobs:
@@ -280,11 +290,26 @@ class Service:
         attempt = dict(index=index, directory=str(folder), config=config, frame_range=frame_range,
                        parent_attempt=parent, reason=reason, status='queued', visual_review=None, keyframes=[])
         job['attempts'].append(attempt)
+        self.enqueue(job, attempt)
+
+    def enqueue(self, job, attempt):
+        """Called under the service lock; persist submission failures instead of phantom queues."""
         job.update(status='queued', quality_passed=False)
+        attempt['status'] = 'queued'
         job.pop('error', None)
         job.pop('traceback', None)
         self.save(job)
-        self.executor.submit(self.run, job['job_id'], index)
+        try:
+            if self.closing:
+                raise RuntimeError('SAM3 service is shutting down; inference was not submitted')
+            self.executor.submit(self.run, job['job_id'], attempt['index'])
+        except Exception as exc:
+            error = f'Inference submission failed: {type(exc).__name__}: {exc}'
+            trace = traceback.format_exc()
+            attempt.update(status='failed', error=error, traceback=trace)
+            job.update(status='failed', error=error, traceback=trace)
+            self.save(job)
+            LOG.exception('Failed to enqueue job=%s attempt=%s', job['job_id'], attempt['index'])
 
     def run(self, job_id, index):
         with self.lock:
@@ -437,9 +462,7 @@ class Service:
                 job['status'] = ('retry_exhausted' if len(job['attempts'])-1 >= job['max_retry']
                                  else 'needs_retry')
             elif all(k['review'] and k['review']['passed'] for k in attempt['keyframes']):
-                job['status'] = attempt['status'] = 'queued'
-                self.save(job)
-                self.executor.submit(self.run, job_id, attempt_index)
+                self.enqueue(job, attempt)
             self.save(job)
         return self.result(job_id)
 
@@ -533,21 +556,40 @@ def build_server(args):
     service = None
 
     @asynccontextmanager
-    async def lifespan(_):
+    async def application_lifespan(_):
         nonlocal service
-        # Both load and inference use the one dedicated GPU worker.
-        service = Service(None,args.work_root,args.input_root)
+        if service is not None:
+            raise RuntimeError('SAM3 HTTP application is already running')
+        # Owned by the HTTP application, never by individual MCP sessions.
+        instance = Service(None,args.work_root,args.input_root)
+        service = instance
         try:
-            service.backend = service.executor.submit(SAM3Backend,args.weights,args.device,
-                                                       args.base_size,args.float32).result()
+            instance.backend = await asyncio.wrap_future(instance.executor.submit(
+                SAM3Backend,args.weights,args.device,args.base_size,args.float32))
             yield {}
         finally:
-            service.executor.shutdown(wait=True)
-            service.package_executor.shutdown(wait=True)
+            try:
+                await asyncio.to_thread(instance.close)
+            finally:
+                service = None
+
+    class SAM3MCP(FastMCP):
+        def streamable_http_app(self):
+            app = super().streamable_http_app()
+            transport_lifespan = app.router.lifespan_context
+
+            @asynccontextmanager
+            async def lifespan(application):
+                async with application_lifespan(application):
+                    async with transport_lifespan(application) as context:
+                        yield context
+
+            app.router.lifespan_context = lifespan
+            return app
 
     # Accept any HTTP Host/Origin; network access is controlled outside MCP.
     security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    mcp = FastMCP('SAM3 video segmentation',host=args.host,port=args.port,lifespan=lifespan,
+    mcp = SAM3MCP('SAM3 video segmentation',host=args.host,port=args.port,
                   transport_security=security)
 
     @mcp.tool()

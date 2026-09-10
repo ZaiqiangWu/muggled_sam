@@ -21,6 +21,8 @@ python mcp_server.py --weights ./model_weights/sam3.pt \
 
 OpenCV 必须支持 MP4V 编码；生成的是无音轨、恒定 FPS 的检查视频，帧顺序来自 OpenCV 解码，原视频音频/VFR 时间戳不保留。RGBA PNG 保留原尺寸和 RGB，alpha 为最终二值 mask（0/255），空 mask 全透明。
 
+Service、SAM3 模型、推理和打包线程池由 HTTP 应用生命周期管理，应用启动时只创建一次，应用关闭时才释放；MCP 会话初始化、断开或重连不会创建另一套 Service，也不会关闭共享线程池。首次提交、重试、keyframe 审核通过后的推理入队若失败，job 和 attempt 会立即记录 `status=failed`、`error` 和 traceback，不会留下没有实际入队的 `queued`。部署该修复需要重启服务进程；原有 queued/running 任务按启动恢复规则标为 failed，不自动续跑，可在重试预算内使用原 job 重试，不需要重新上传视频。
+
 ## Mac 连接与文件传输
 
 服务通过 Tailscale 私有网络直连，不需要 SSH 隧道（HTTP 本身无账号认证，访问范围由 Tailscale ACL/防火墙控制）：
