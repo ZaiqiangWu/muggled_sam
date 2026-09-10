@@ -1295,7 +1295,7 @@ class Session:
         # Selected object: semi-transparent green overlay over the mask region
         if (disp_mask_uint8 > 0).any():
             overlay = disp.copy()
-            overlay[disp_mask_uint8 > 0] = (0, 230, 255)  # BGR green
+            overlay[disp_mask_uint8 > 0] = (0, 255, 0)  # BGR: pure green (R,G,B = 0,255,0)
             disp = cv2.addWeighted(overlay, 0.35, disp, 0.65, 0)
 
         # Unselected objects' outlines (dim, like the unselected overlay)
