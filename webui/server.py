@@ -278,6 +278,7 @@ class Session:
         self.num_obj_buffers = DEFAULT_NUM_OBJECT_BUFFERS
         self.objiter = list(range(self.num_obj_buffers))
         self.memory_list = []
+        self.prompt_store_log = []  # per-buffer list of 'Store Prompt' events (for undo)
         self.maskresults_list = []
         self.savebuffers_list = []
 
@@ -489,6 +490,7 @@ class Session:
                 )
                 for _ in self.objiter
             ]
+            self.prompt_store_log = [[] for _ in self.objiter]
 
             # Reset prompt/text/UI state
             self.prompts = ([], [], [])
@@ -758,6 +760,7 @@ class Session:
                 selected_mask = selected_text_preview["mask_predictions"][0, self.selected_mask_idx]
                 init_mem = self.sammodel.initialize_from_mask(self.encoded_img, selected_mask)
                 self.memory_list[buffer].store_prompt_result(self.frame_idx, init_mem)
+                self._log_stored_prompt(buffer, has_ptr=False)
                 if not self.cfg["keep_history_on_new_prompts"]:
                     self.memory_list[buffer].prevframe_buffer.clear()
                 self.text_prompts_by_object[buffer] = selected_text_preview["text_prompt"]
@@ -776,6 +779,7 @@ class Session:
                     mask_index_select=self.selected_mask_idx,
                 )
                 self.memory_list[buffer].store_prompt_result(self.frame_idx, init_mem, init_ptr)
+                self._log_stored_prompt(buffer, has_ptr=(init_ptr is not None))
 
             # Clear working prompts after storing (like ui_elems.clear_prompts())
             self.prompts = ([], [], [])
@@ -792,10 +796,42 @@ class Session:
             self._require_open()
             buffer = self.buffer_select_idx if buffer is None else int(buffer)
             self.memory_list[buffer].prompts_buffer.clear()
+            self.prompt_store_log[buffer] = []
             self.maskresults_list[buffer].clear()
             self.text_prompts_by_object.pop(buffer, None)
             self.text_prompt_drafts_by_object.pop(buffer, None)
             self.text_candidate_previews.pop(buffer, None)
+            return self.display_payload()
+
+    def _log_stored_prompt(self, buffer, has_ptr):
+        """Remember one 'Store Prompt' event so /api/undo_prompt can reverse it.
+        Needed because text-candidate stores append no object pointer, which would
+        otherwise misalign the prompts_buffer's three deques."""
+        log = self.prompt_store_log[buffer]
+        log.insert(0, {"has_ptr": has_ptr})
+        if len(log) > 32:  # prompts_buffer capacity
+            log.pop()
+
+    def undo_prompt(self, buffer=None):
+        """'Undo Prompt' button: remove the most recently stored prompt of the
+        selected buffer (one 'Store Prompt' step back), keeping older ones."""
+        with self.lock:
+            self._require_open()
+            buffer = self.buffer_select_idx if buffer is None else int(buffer)
+            log = self.prompt_store_log[buffer]
+            if not log:
+                raise ValueError("Nothing to undo: no stored prompts in this buffer.")
+            entry = log.pop(0)
+            pb = self.memory_list[buffer].prompts_buffer
+            pb.idx.popleft()
+            pb.memory_history.popleft()
+            if entry["has_ptr"] and len(pb.pointer_history) > 0:
+                pb.pointer_history.popleft()
+            if buffer == self.buffer_select_idx:
+                if self.memory_list[buffer].check_has_prompts():
+                    self._run_display_tracking_step(buffer)
+                else:
+                    self.maskresults_list[buffer].clear()
             return self.display_payload()
 
     def clear_history(self, buffer=None):
@@ -1368,6 +1404,7 @@ class Session:
             "mask_idx": self.selected_mask_idx,
             "score": round(self.maskresults_list[buffer].objscore, 3) if self.maskresults_list else 0.0,
             "num_buffers": self.num_obj_buffers,
+            "num_prompt_mems": self.memory_list[buffer].get_num_memories()[0] if self.memory_list else 0,
             "prompts": {
                 "boxes": [list(b) for b in self.prompts[0]],
                 "fg": [list(p) for p in self.prompts[1]],
@@ -1623,6 +1660,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(s.select_mask(body.get("idx", 1)))
         if route == "/api/store_prompt":
             return self._send_json(s.store_prompt(buffer=body.get("buffer")))
+        if route == "/api/undo_prompt":
+            return self._send_json(s.undo_prompt(buffer=body.get("buffer")))
         if route == "/api/clear_prompts":
             return self._send_json(s.clear_prompts(buffer=body.get("buffer")))
         if route == "/api/clear_history":

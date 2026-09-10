@@ -289,6 +289,7 @@ function updateInfoFromDisplay(res) {
     (!!res.prompts && res.prompts.boxes.length + res.prompts.fg.length + res.prompts.bg.length > 0) ||
     state.status.has_text_preview;
   $("btn-store").disabled = !hasStorablePrompt;
+  $("btn-undo-prompt").disabled = !(res.num_prompt_mems > 0);
 
   const total = state.video.total_frames;
   $("frame-text").textContent = total > 1 ? `Frame: ${res.frame_idx}/${total}` : "Frame: (live)";
@@ -398,6 +399,7 @@ async function pollStatus() {
     $("tgl-record").checked = st.ui.is_record_enabled;
 
     $("btn-close").disabled = !st.open;
+    $("btn-undo-prompt").disabled = !(st.open && st.num_prompt_mems > 0);
 
     applyHideInfo(!!st.config.hide_info);
     updateTextUI();
@@ -478,6 +480,12 @@ async function storePrompt() {
   const res = await api("/api/store_prompt", { method: "POST", body: {} });
   renderDisplay(res);
   toast("Prompt stored");
+}
+
+async function undoPrompt() {
+  const res = await api("/api/undo_prompt", { method: "POST", body: {} });
+  renderDisplay(res);
+  toast("Last stored prompt removed");
 }
 
 async function toggleUI(name) {
@@ -886,6 +894,7 @@ async function closeVideo() {
     octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     $("status-banner").textContent = "";
     $("btn-store").disabled = true;
+    $("btn-undo-prompt").disabled = true;
     syncMaskGridSize();
     pollStatus();
   });
@@ -934,6 +943,7 @@ function wire() {
 
   // prompt actions
   $("btn-store").onclick = () => storePrompt().catch((e) => toast(e.message, true));
+  $("btn-undo-prompt").onclick = () => undoPrompt().catch((e) => toast(e.message, true));
   $("btn-clear-prompts").onclick = () =>
     api("/api/clear_prompts", { method: "POST", body: {} }).then(renderDisplay)
       .catch((e) => toast(e.message, true));
