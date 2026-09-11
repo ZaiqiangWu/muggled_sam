@@ -31,6 +31,7 @@ const state = {
   // prompt editing (client-side mirror; server is authoritative)
   tool: "hover",
   prompts: { boxes: [], fg: [], bg: [] },
+  promptHistory: [],  // placement order of working prompts: {kind: 'box'|'fg'|'bg'}
   boxDrag: null,      // {x0, y0, x1, y1} normalized, in progress
   cropRect: null,     // committed crop rect (normalized) while crop tool active
   cropDrag: null,
@@ -282,7 +283,10 @@ function updateInfoFromDisplay(res) {
   state.score = res.score;
   state.video.fps = res.fps || state.video.fps;
   state.video.total_frames = res.total_frames;
-  if (res.prompts) state.prompts = res.prompts;
+  if (res.prompts) {
+    state.prompts = res.prompts;
+    syncPromptHistory(res.prompts);
+  }
 
   // Store Prompt only makes sense with working prompts or a live text candidate
   const hasStorablePrompt =
@@ -463,7 +467,39 @@ async function sendPrompts() {
 function addPromptPoint(kind, x, y) {
   if (kind === "fg") state.prompts.fg.push([x, y]);
   else state.prompts.bg.push([x, y]);
+  state.promptHistory.push({ kind: kind === "fg" ? "fg" : "bg" });
+  updateUndoLastButton();
   sendPrompts().catch((e) => toast(e.message, true));
+}
+
+function undoLastPrompt() {
+  const last = state.promptHistory.pop();
+  if (!last) return;
+  if (last.kind === "box") state.prompts.boxes.pop();
+  else if (last.kind === "fg") state.prompts.fg.pop();
+  else state.prompts.bg.pop();
+  updateUndoLastButton();
+  drawOverlay();
+  sendPrompts().catch((e) => toast(e.message, true));
+}
+
+function updateUndoLastButton() {
+  const btn = $("tool-undo");
+  if (btn) btn.disabled = state.promptHistory.length === 0;
+}
+
+// Keep the client-side placement history consistent with the server's
+// authoritative prompt set; reset it whenever the counts diverge (e.g. the
+// server cleared working prompts after Store Prompt or a buffer switch).
+function syncPromptHistory(serverPrompts) {
+  const counts = { box: 0, fg: 0, bg: 0 };
+  for (const h of state.promptHistory) counts[h.kind]++;
+  const ok =
+    serverPrompts.boxes.length === counts.box &&
+    serverPrompts.fg.length === counts.fg &&
+    serverPrompts.bg.length === counts.bg;
+  if (!ok) state.promptHistory = [];
+  updateUndoLastButton();
 }
 
 async function selectBuffer(idx) {
@@ -630,6 +666,7 @@ window.addEventListener("mouseup", (evt) => {
       const br = [Math.max(drag.x0, drag.x1), Math.max(drag.y0, drag.y1)];
       if (state.tool === "box") {
         state.prompts.boxes.push([tl, br]);
+        state.promptHistory.push({ kind: "box" });
         state.boxDrag = null;
         sendPrompts().catch((e) => toast(e.message, true));
       } else {
@@ -850,6 +887,9 @@ document.addEventListener("keydown", (evt) => {
   } else if (k === "-" || k === "_") {
     state.zoom = Math.max(state.zoom - 0.1, 0.4);
     applyZoom();
+  } else if ((k === "z" || k === "Z") && (evt.ctrlKey || evt.metaKey)) {
+    evt.preventDefault();
+    if (state.open && state.promptHistory.length > 0) undoLastPrompt();
   } else if (k === "g" || k === "G") {
     saveState().catch((e) => toast(e.message, true));
   } else if (k === "q" || k === "Q") {
@@ -890,6 +930,8 @@ async function closeVideo() {
     await api("/api/close", { method: "POST", body: {} });
     state.open = false;
     state.playing = false;
+    state.promptHistory = [];
+    updateUndoLastButton();
     fctx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
     octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     for (let i = 0; i < 4; i++) {
@@ -940,10 +982,16 @@ function wire() {
     const btn = $("tool-" + t);
     if (btn) btn.onclick = () => selectTool(t);
   }
+  $("tool-undo").onclick = () => {
+    if (state.promptHistory.length > 0) undoLastPrompt();
+  };
   $("tool-clear").onclick = () => {
     state.prompts = { boxes: [], fg: [], bg: [] };
+    state.promptHistory = [];
+    updateUndoLastButton();
     sendPrompts().catch((e) => toast(e.message, true));
   };
+  updateUndoLastButton();
 
   // prompt actions
   $("btn-store").onclick = () => storePrompt().catch((e) => toast(e.message, true));

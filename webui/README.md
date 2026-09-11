@@ -52,7 +52,9 @@ exactly like in the script:
      like the script's hover behavior);
    - **Box** tool: drag a bounding box;
    - **FG Point / BG Point**: add points;
-   - **Clear**: wipe working prompts.
+   - **Undo Last** (`Ctrl/Cmd+Z`): undo the last placed box or point
+     (repeatable; only affects working prompts, not stored ones);
+   - **Clear**: wipe all working prompts.
    The 4 mask previews update live; select one with the preview buttons or
    `↑`/`↓`.
 3. **Store Prompt** (`Tab`) stores the current prompts (or the selected text
