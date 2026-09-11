@@ -1,4 +1,4 @@
-# Task
+# Task 1: interface for Prompt Authoring (done)
 
 - 先理解`save_prompts_run_video.py`的作用
 - 开发一个网页，其功能以及参数和`save_prompts_run_video.py`完全一致
@@ -8,3 +8,9 @@
   - 不使用--input_video xxx.mp4指定输入视频，而是添加一个Open按钮交互式选择运行该网页的服务器上的文件
   - 添加一个Save按钮来保存./saved_tracking_state.pt文件
 - 不要在该Mac上做任何测试，只管开发
+
+# Task 2: interface for Video Segmentation (todo)
+
+阶段一:Prompt Authoring(交互式标注 prompt)
+
+阶段二:Video Segmentation

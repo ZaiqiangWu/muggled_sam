@@ -400,7 +400,6 @@ async function pollStatus() {
     $("tgl-preview").checked = st.ui.show_preview;
     $("tgl-invert").checked = st.ui.invert_mask;
     $("tgl-history").checked = st.ui.enable_history;
-    $("tgl-record").checked = st.ui.is_record_enabled;
 
     $("btn-close").disabled = !st.open;
     $("btn-undo-prompt").disabled = !(st.open && st.num_prompt_mems > 0);
@@ -1243,7 +1242,6 @@ function wire() {
   $("tgl-preview").onchange = (e) => toggleUI("preview").catch((err) => { e.target.checked = !e.target.checked; toast(err.message, true); });
   $("tgl-invert").onchange = (e) => toggleUI("invert").catch((err) => { e.target.checked = !e.target.checked; toast(err.message, true); });
   $("tgl-history").onchange = (e) => toggleUI("history").catch((err) => { e.target.checked = !e.target.checked; toast(err.message, true); });
-  $("tgl-record").onchange = (e) => toggleUI("record").catch((err) => { e.target.checked = !e.target.checked; toast(err.message, true); });
 
   // mask preview slots
   document.querySelectorAll(".preview-slot").forEach((el, i) => {
