@@ -1106,10 +1106,13 @@ async function startUpload(dirName, items) {
     setUploadProgress(0, uploadCtx.cancelled
       ? "Cancelled (incomplete files were not kept on the server)"
       : "Failed: " + err.message);
+  } finally {
+    // Runs on every exit path (done, all skipped, cancelled, error) so the
+    // dialog can always be closed and the button re-enabled.
+    $("btn-upload-cancel").disabled = true;
+    $("btn-upload-close").disabled = false;
+    $("btn-upload-dir").disabled = false;
   }
-  $("btn-upload-cancel").disabled = true;
-  $("btn-upload-close").disabled = false;
-  $("btn-upload-dir").disabled = false;
 }
 
 async function pickUploadDir() {
