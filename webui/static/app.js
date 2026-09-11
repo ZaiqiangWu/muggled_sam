@@ -913,7 +913,11 @@ async function saveState() {
   }
   await withBusy("Saving tracking state ...", async () => {
     const res = await api("/api/save_state", { method: "POST", body: {} });
-    toast(`Saved: ${res.path} (buffers ${res.objects.map((i) => i + 1).join(", ")})`);
+    if (res.saved === false) {
+      toast(res.message || "Nothing to save (no prompts stored)");
+    } else {
+      toast(`Saved: ${res.path} (buffers ${res.objects.map((i) => i + 1).join(", ")})`);
+    }
   });
 }
 
@@ -921,12 +925,13 @@ async function closeVideo() {
   stopPlayback();
   await withBusy("Closing video...", async () => {
     if (state.open) {
-      // Like the script: quitting the UI saves the tracking state (when prompts exist)
+      // Like the script: quitting the UI saves the tracking state (when prompts
+      // exist). Save-on-quit is best-effort and never blocks the close.
       try {
         const res = await api("/api/save_state", { method: "POST", body: {} });
-        toast(`Saved: ${res.path}`);
+        if (res.saved !== false) toast(`Saved: ${res.path}`);
       } catch (err) {
-        if (!/No prompts found/i.test(err.message)) throw err;
+        /* save on quit is best-effort: never block the close */
       }
     }
     await api("/api/close", { method: "POST", body: {} });

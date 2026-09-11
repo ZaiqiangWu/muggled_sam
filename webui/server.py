@@ -1319,7 +1319,11 @@ class Session:
             self._require_open()
             has_any_prompts = any(mem.check_has_prompts() for mem in self.memory_list)
             if not has_any_prompts:
-                raise ValueError("No prompts found. Store a prompt for at least one buffer first.")
+                self._log("No prompts stored - nothing to save")
+                return {
+                    "ok": True, "saved": False, "path": None, "objects": [],
+                    "message": "No prompts stored - nothing saved",
+                }
 
             # Only save objects that actually have prompts
             save_data = {}
@@ -1342,7 +1346,7 @@ class Session:
             save_path = osp.join(STATE_SAVE_DIR, f"{stem}.pt")
             torch.save(make_tracking_state(save_data, saved_text_prompts), save_path)
             self._log(f"Saved tracking state to {osp.abspath(save_path)}")
-            return {"ok": True, "path": save_path, "objects": sorted(save_data.keys())}
+            return {"ok": True, "saved": True, "path": save_path, "objects": sorted(save_data.keys())}
 
     # ------------------------------------------------------------------ rendering
 
