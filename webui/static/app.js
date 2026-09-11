@@ -1019,6 +1019,14 @@ function wire() {
 async function init() {
   wire();
   await pollStatus();
+  // If a video is already open (e.g. right after a browser refresh), fetch the
+  // current frame + mask previews once so the view isn't left black until the
+  // next user action
+  if (state.open) {
+    api("/api/frame").then(renderDisplay).catch(() => {
+      /* server may be briefly busy (model load) - the 2s poll covers it */
+    });
+  }
   loadSettingsIntoUI();
   if (state.status && state.status.model) {
     cachedDeviceDefault = state.status.config.device;
