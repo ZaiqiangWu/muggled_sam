@@ -1009,13 +1009,12 @@ function uploadFile(dirName, relPath, file, onProgress) {
   });
 }
 
-async function walkUploadDir(handle, prefix, out) {
+// Top level only: subfolders (and everything inside them) are ignored so
+// huge nested trees never block the upload.
+async function walkUploadDir(handle, out) {
   for await (const entry of handle.values()) {
-    const rel = prefix ? prefix + "/" + entry.name : entry.name;
-    if (entry.kind === "file") {
-      if (isUploadVideo(entry.name)) out.push({ rel, file: await entry.getFile() });
-    } else if (entry.kind === "directory") {
-      await walkUploadDir(entry, rel, out);
+    if (entry.kind === "file" && isUploadVideo(entry.name)) {
+      out.push({ rel: entry.name, file: await entry.getFile() });
     }
   }
 }
@@ -1070,7 +1069,7 @@ async function pickUploadDir() {
         throw err;
       }
       const items = [];
-      await walkUploadDir(root, "", items);
+      await walkUploadDir(root, items);
       await startUpload(root.name, items);
     } else {
       // non-Chromium fallback: webkitdirectory file input
@@ -1096,8 +1095,8 @@ function wire() {
     if (!files.length) return;
     const dirName = files[0].webkitRelativePath.split("/")[0];
     const items = files
-      .filter((f) => isUploadVideo(f.name))
-      .map((f) => ({ rel: f.webkitRelativePath.slice(dirName.length + 1), file: f }));
+      .filter((f) => f.webkitRelativePath === dirName + "/" + f.name && isUploadVideo(f.name))
+      .map((f) => ({ rel: f.name, file: f }));
     startUpload(dirName, items).catch((e) => toast(e.message, true));
   });
   $("btn-upload-cancel").onclick = () => {
