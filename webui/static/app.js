@@ -892,6 +892,10 @@ async function closeVideo() {
     state.playing = false;
     fctx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
     octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    for (let i = 0; i < 4; i++) {
+      const prevCanvas = $("prev" + i);
+      prevCanvas.getContext("2d").clearRect(0, 0, prevCanvas.width, prevCanvas.height);
+    }
     $("status-banner").textContent = "";
     $("btn-store").disabled = true;
     $("btn-undo-prompt").disabled = true;
