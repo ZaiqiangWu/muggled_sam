@@ -1065,7 +1065,10 @@ async function pickUploadDir() {
       try {
         root = await window.showDirectoryPicker();
       } catch (err) {
-        if (err && err.name === "AbortError") return; // user closed the picker
+        if (err && err.name === "AbortError") {  // user closed the picker
+          btn.disabled = false;
+          return;
+        }
         throw err;
       }
       const items = [];
