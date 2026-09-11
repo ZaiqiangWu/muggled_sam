@@ -10,7 +10,7 @@ in a web page served on port 8765 (bound to 0.0.0.0 so any IP can connect).
 Differences from the original script (per webui/task.md):
   * `--input_video xxx.mp4` is replaced by an interactive "Open" button that
     lets the user browse and pick a file on the server running this page.
-  * A "Save" button saves `<video_stem>.pt` next to the video file
+  * A "Save" button saves `./tracking_states/<video_stem>.pt` (repo root)
     (in the script this happened automatically when the window closed).
 
 Run from the repository root:
@@ -93,11 +93,11 @@ DEFAULT_BG_COLOR_HEX = "ff00ff00"
 DEFAULT_FFMPEG = get_default_ffmpeg_command()
 
 # Relative paths are resolved against the repo root so that `./model_weights/sam3.pt`
-# works even if the server is launched from elsewhere. Tracking state is saved
-# next to the open video file, named after it (clip.mp4 -> clip.pt);
-# STATE_SAVE_PATH is only the fallback for webcam sessions.
+# works even if the server is launched from elsewhere. Tracking states are saved
+# to <repo_root>/tracking_states/<video_stem>.pt (folder created on demand),
+# e.g. clip.mp4 -> tracking_states/clip.pt (webcam -> tracking_states/webcam.pt).
 DEFAULT_MODEL_FILE = osp.join(_REPO_ROOT, "model_weights", "sam3.pt")
-STATE_SAVE_PATH = "saved_tracking_state.pt"
+STATE_SAVE_DIR = osp.join(_REPO_ROOT, "tracking_states")
 
 VIDEO_EXTS = {
     ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg",
@@ -1276,9 +1276,9 @@ class Session:
     def save_state(self):
         """
         The 'Save' button. Mirrors the end-of-script block:
-        save <video_stem>.pt (next to the video file, webcam:
-        ./saved_tracking_state.pt) with the tracking state of all buffers
-        that have prompts (plus their text prompts).
+        save <repo_root>/tracking_states/<video_stem>.pt (webcam: webcam.pt)
+        with the tracking state of all buffers that have prompts
+        (plus their text prompts).
         """
         with self.lock:
             self._require_open()
@@ -1297,12 +1297,14 @@ class Session:
                 for objidx in save_data
                 if objidx in self.text_prompts_by_object
             }
-            # Save next to the video file, named after it (clip.mp4 -> clip.pt);
-            # webcam sessions have no video file and fall back to the fixed name.
+            # Save to <repo_root>/tracking_states/, named after the video
+            # (clip.mp4 -> tracking_states/clip.pt); webcam -> webcam.pt.
+            os.makedirs(STATE_SAVE_DIR, exist_ok=True)
             if self.video_path and osp.isfile(self.video_path):
-                save_path = osp.splitext(self.video_path)[0] + ".pt"
+                stem = osp.splitext(osp.basename(self.video_path))[0]
             else:
-                save_path = STATE_SAVE_PATH
+                stem = "webcam"
+            save_path = osp.join(STATE_SAVE_DIR, f"{stem}.pt")
             torch.save(make_tracking_state(save_data, saved_text_prompts), save_path)
             self._log(f"Saved tracking state to {osp.abspath(save_path)}")
             return {"ok": True, "path": save_path, "objects": sorted(save_data.keys())}
@@ -1705,7 +1707,7 @@ def main():
                         help=f"Host to bind to (default: {DEFAULT_HOST}, i.e. any IP)")
     args = parser.parse_args()
 
-    # Run from the repo root so relative paths (./model_weights, ./saved_tracking_state.pt)
+    # Run from the repo root so relative paths (./model_weights, ./tracking_states)
     # behave exactly like in the original script
     os.chdir(_REPO_ROOT)
 
@@ -1714,7 +1716,7 @@ def main():
 
     print(f"Web UI running at http://{args.host}:{args.port}/  (any IP can connect)")
     print(f"  Repo root: {_REPO_ROOT}")
-    print(f"  Tracking state saves go next to the video file, named after it (webcam: {osp.abspath(STATE_SAVE_PATH)})")
+    print(f"  Tracking state saves go to: {STATE_SAVE_DIR}/<video_stem>.pt")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

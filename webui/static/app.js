@@ -2,7 +2,7 @@
  *
  * Mirrors the interactive workflow of save_prompts_run_video.py:
  *  - Open (file browser on the server) replaces --input_video
- *  - Save button saves ./saved_tracking_state.pt
+ *  - Save button saves ./tracking_states/<video_stem>.pt
  *  - Tools: Hover / Box / FG Point / BG Point / Clear (+ Crop when enabled)
  *  - Playback: play/pause (track), seek, step, reverse
  *  - Buffers, recording, text prompts (SAM3), preview/invert toggles
@@ -869,7 +869,7 @@ async function saveState() {
     toast("Open a video first", true);
     return;
   }
-  await withBusy("Saving ./saved_tracking_state.pt ...", async () => {
+  await withBusy("Saving tracking state ...", async () => {
     const res = await api("/api/save_state", { method: "POST", body: {} });
     toast(`Saved: ${res.path} (buffers ${res.objects.map((i) => i + 1).join(", ")})`);
   });
