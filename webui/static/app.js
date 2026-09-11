@@ -1404,17 +1404,10 @@ async function loadSegDir(kind, path) {
     const div = document.createElement("div");
     div.className = "dir-entry" + (isDir ? " dir" : " file");
     div.innerHTML = `<span class="icon">${icon}</span>${escHtml(name)}`;
+    // Single click only selects (folders included); double click opens
+    // a folder, or confirms the selection for files / folder-type picks.
     div.onclick = () => {
-      if (isDir) {
-        if (kind === "dir") {
-          segBrowseCtx.sel = fullPath;
-        } else {
-          loadSegDir(kind, fullPath).catch((e) => toast(e.message, true));
-          return;
-        }
-      } else {
-        segBrowseCtx.sel = fullPath;
-      }
+      segBrowseCtx.sel = fullPath;
       list.querySelectorAll(".dir-entry.selected").forEach((el) => el.classList.remove("selected"));
       div.classList.add("selected");
       $("seg-browse-selected").textContent = fullPath;
