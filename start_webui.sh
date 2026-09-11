@@ -12,4 +12,4 @@ echo "Running on $(hostname)"
 echo "Python: $(which python)"
 
 nvidia-smi
-python webui/server.py
+python webui/server.py --https

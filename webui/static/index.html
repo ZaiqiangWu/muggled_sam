@@ -56,7 +56,14 @@
         <button id="btn-upload-dir" style="margin-left:2px"
           title="Pick a local folder and upload its top-level video files (video extensions only; subfolders are ignored) to the server's videos/ folder">Upload video dir</button>
       </div>
-      <!-- hidden input for the webkitdirectory fallback (non-Chromium browsers) -->
+      <div id="picker-warn" class="hint" style="display:none;color:var(--warn);line-height:1.45">
+        Folder picker: legacy mode. This page runs over plain http, so the browser
+        scans ALL subfolders when you pick a folder (slow for large trees, not
+        cancellable). Restart the server with <code>--https</code> and open
+        https://&lt;ip&gt;:8765 once (accept the cert warning) to use the fast
+        top-level-only picker.
+      </div>
+      <!-- hidden input for the webkitdirectory fallback (plain http / non-Chromium) -->
       <input type="file" id="upload-dir-input" webkitdirectory directory multiple style="display:none">
 
       <!-- Playback -->

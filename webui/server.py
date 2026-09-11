@@ -1795,12 +1795,35 @@ class Handler(BaseHTTPRequestHandler):
 # %% Main
 
 
+def _ensure_self_signed(cert_path, key_path):
+    """Create (or reuse) a self-signed cert via the openssl CLI so the page can
+    be served over HTTPS. Chrome only exposes the fast directory picker
+    (showDirectoryPicker) in a secure context; over plain http the
+    webkitdirectory fallback is used instead, and that one scans every
+    subfolder of the picked folder - which hangs on large trees."""
+    import subprocess
+    os.makedirs(osp.dirname(cert_path), exist_ok=True)
+    if osp.exists(cert_path) and osp.exists(key_path):
+        return
+    cmd = [
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", key_path, "-out", cert_path, "-days", "3650",
+        "-subj", "/CN=muggled-sam-webui",
+        "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Web UI for save_prompts_run_video.py")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help=f"Port to serve on (default: {DEFAULT_PORT})")
     parser.add_argument("--host", type=str, default=DEFAULT_HOST,
                         help=f"Host to bind to (default: {DEFAULT_HOST}, i.e. any IP)")
+    parser.add_argument("--https", action="store_true",
+                        help="Serve over HTTPS with an auto-generated self-signed cert. "
+                             "Needed for Chrome's fast folder picker when connecting "
+                             "from another machine over plain http.")
     args = parser.parse_args()
 
     # Run from the repo root so relative paths (./model_weights, ./tracking_states)
@@ -1810,7 +1833,22 @@ def main():
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
 
-    print(f"Web UI running at http://{args.host}:{args.port}/  (any IP can connect)")
+    scheme = "http"
+    if args.https:
+        import ssl
+        cert_dir = osp.join(_REPO_ROOT, ".webui_ssl")
+        cert_path = osp.join(cert_dir, "cert.pem")
+        key_path = osp.join(cert_dir, "key.pem")
+        _ensure_self_signed(cert_path, key_path)
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(cert_path, key_path)
+        server.socket = ssl_ctx.wrap_socket(server.socket, server_side=True)
+        scheme = "https"
+
+    display_host = "0.0.0.0" if args.host == "0.0.0.0" else args.host
+    print(f"Web UI running at {scheme}://{display_host}:{args.port}/  (any IP can connect)")
+    if scheme == "https":
+        print("  Self-signed cert: browsers show a warning page once - accept it to continue.")
     print(f"  Repo root: {_REPO_ROOT}")
     print(f"  Tracking state saves go to: {STATE_SAVE_DIR}/<video_stem>.pt")
     print(f"  Uploaded video folders go to: {UPLOAD_ROOT}/<folder_name>/")

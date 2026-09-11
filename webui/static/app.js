@@ -1010,17 +1010,24 @@ function uploadFile(dirName, relPath, file, onProgress) {
 }
 
 // Top level only: subfolders (and everything inside them) are ignored so
-// huge nested trees never block the upload.
+// huge nested trees never block the upload. Cancellable via uploadCtx.
 async function walkUploadDir(handle, out) {
+  let scanned = 0;
   for await (const entry of handle.values()) {
+    if (uploadCtx && uploadCtx.cancelled) return;
+    scanned += 1;
     if (entry.kind === "file" && isUploadVideo(entry.name)) {
+      setUploadProgress(0, `Scanning ... ${scanned} entries: reading ${entry.name}`);
       out.push({ rel: entry.name, file: await entry.getFile() });
     }
+    setUploadProgress(0, `Scanning ... ${scanned} top-level entries, ${out.length} video file(s) found`);
   }
 }
 
 async function startUpload(dirName, items) {
   if (!items.length) {
+    $("upload-dialog").style.display = "none";
+    uploadCtx = null;
     toast("No video files found in the selected folder", true);
     $("btn-upload-dir").disabled = false;
     return;
@@ -1071,11 +1078,27 @@ async function pickUploadDir() {
         }
         throw err;
       }
+      // Show the progress dialog while scanning so a slow folder listing is
+      // visible and can be cancelled instead of looking like a hang.
+      uploadCtx = { cancelled: false, xhr: null };
+      $("upload-dialog").style.display = "flex";
+      $("btn-upload-cancel").disabled = false;
+      $("btn-upload-close").disabled = true;
+      $("upload-dest").textContent = `-> videos/${root.name}`;
+      setUploadProgress(0, `Scanning ${root.name} (top level only) ...`);
       const items = [];
       await walkUploadDir(root, items);
+      if (uploadCtx.cancelled) {
+        $("upload-dialog").style.display = "none";
+        uploadCtx = null;
+        btn.disabled = false;
+        return;
+      }
       await startUpload(root.name, items);
     } else {
-      // non-Chromium fallback: webkitdirectory file input
+      // non-Chromium fallback: webkitdirectory file input. Note: the browser
+      // itself enumerates the whole tree before the change event fires, so
+      // subfolders cannot be skipped on this path.
       btn.disabled = false;
       $("upload-dir-input").click();
     }
@@ -1088,6 +1111,16 @@ async function pickUploadDir() {
 // ------------------------------------------------------------------ wiring
 
 function wire() {
+  // Chrome only exposes showDirectoryPicker (fast, top-level-only picker) in
+  // a secure context. Over plain http from another machine the webkitdirectory
+  // fallback is used instead, and the browser scans every subfolder - warn.
+  if (typeof window.showDirectoryPicker !== "function") {
+    $("picker-warn").style.display = "block";
+    $("btn-upload-dir").title =
+      "Legacy folder picker active (plain http): the browser scans ALL subfolders, " +
+      "which is slow and not cancellable for large trees. Restart the server with " +
+      "--https and open https://<ip>:8765 (accept the cert warning) for the fast picker.";
+  }
   $("btn-open").onclick = openDialog;
   $("btn-save").onclick = saveState;
   $("btn-close").onclick = closeVideo;
