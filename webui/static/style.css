@@ -74,7 +74,7 @@ html, body {
 
 #header .hdr-item { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30%; }
 #header .hdr-path { max-width: 45%; }
-#footer { justify-content: center; flex-wrap: wrap; gap: 8px; padding: 4px 10px; }
+#footer { justify-content: center; flex-wrap: wrap; gap: 8px; padding: 4px 10px; margin-top: 8px; }
 
 /* ---------- canvas ---------- */
 #canvas-wrap {

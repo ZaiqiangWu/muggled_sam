@@ -7,14 +7,6 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- Header info bar (hidden when 'hide info' is on) -->
-  <header id="header" class="msgbar">
-    <span id="hdr-model" class="hdr-item">-</span>
-    <span id="hdr-tokens" class="hdr-item">-</span>
-    <span id="hdr-device" class="hdr-item">-</span>
-    <span id="hdr-video" class="hdr-item hdr-path"></span>
-  </header>
-
   <!-- Top-level view tabs: switching keeps each view's state intact -->
   <nav id="tabs">
     <button id="tab-authoring" class="tab active">Prompt Authoring</button>
@@ -276,7 +268,17 @@
     </div><!-- /#view-segmentation -->
   </main>
 
-  <!-- Footer key help (hidden when 'hide info' is on) -->
+  <!-- Info bar (model / tokens / device / video): bottom row 1 of the
+       two-row stack, only on the Prompt Authoring view; hidden when
+       'hide info' is on (see applyHideInfo) -->
+  <header id="header" class="msgbar">
+    <span id="hdr-model" class="hdr-item">-</span>
+    <span id="hdr-tokens" class="hdr-item">-</span>
+    <span id="hdr-device" class="hdr-item">-</span>
+    <span id="hdr-video" class="hdr-item hdr-path"></span>
+  </header>
+
+  <!-- Footer key help: bottom row 2 (hidden when 'hide info' is on) -->
   <footer id="footer" class="msgbar">
     <span>[space] Play/Pause</span>
     <span>[p] Preview</span>

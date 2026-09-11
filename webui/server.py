@@ -1893,8 +1893,17 @@ class SegmentationQueue:
         )
         device = cfg["device"]
 
-        # 2) video
+        # 2) video (always released, even if the job fails mid-run)
         vreader = ReversibleLoopingVideoReader(job.video_path)
+        try:
+            self._run_job_frames(job, cfg, model, model_name, device, vreader)
+        finally:
+            try:
+                vreader.release()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _run_job_frames(self, job, cfg, model, model_name, device, vreader):
         video_fps = vreader.get_fps() or 30.0
         total_frames = int(vreader.total_frames or 0)
 
@@ -2035,10 +2044,6 @@ class SegmentationQueue:
                 job.finished_at = time.time()
         else:
             job.saved_paths = []
-        try:
-            vreader.release()
-        except Exception:  # noqa: BLE001
-            pass
 
     # ------------------------------------------------------------- per-frame helpers
     @staticmethod
