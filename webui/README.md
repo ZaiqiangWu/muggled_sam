@@ -1,7 +1,16 @@
-# Web UI for `save_prompts_run_video.py`
+# Muggled SAM Web UI
 
-A single-page web app that reproduces the functionality and parameters of
-`save_prompts_run_video.py` (run from any browser on the network).
+A single-page web app with two tabs (run from any browser on the network):
+
+- **Prompt Authoring** — reproduces the functionality and parameters of
+  `save_prompts_run_video.py` (interactive prompt labeling + save tracking state).
+- **Video Segmentation** — submit queued segmentation jobs that reproduce
+  `load_prompts_run_video.py` / `load_prompts_run_dir.py` (apply a saved `.pt`
+  to one video, or to every `.mp4` in a folder), with live per-video progress.
+
+Both tabs stay mounted, so switching between them never loses state (an open
+video + prompts on the authoring side, submitted jobs + progress on the
+segmentation side).
 
 ## Differences from the script (per `task.md`)
 
@@ -122,9 +131,62 @@ startup; the web version does the same thing interactively on the first frame).
 Changing model / device / float32 / buffer count requires re-Opening the video
 (the panel tells you when that's needed).
 
+## Video Segmentation tab (Task 2)
+
+Switch to the **Video Segmentation** tab (top of the page). It has two parts:
+a **New segmentation task** form (left) and a **Task queue** (right).
+
+### Submitting a task
+
+Pick a **Task type**:
+
+- **Single video** — equivalent to
+  `python load_prompts_run_video.py --prompt_path <pt> --input_video <video>`.
+  Use **Browse** to pick the server-side **Prompt file (.pt)** and the
+  **Input video**.
+- **Video folder** — equivalent to
+  `python load_prompts_run_dir.py --prompt_path <pt> --input_dir <dir>`.
+  Use **Browse** to pick the **Prompt file (.pt)** and the **Videos folder**.
+  The folder's top-level `*.mp4` files are each queued as their own job (same
+  as the script, which runs the per-video script on each clip).
+
+The **Settings** dropdown exposes the relevant `load_prompts_run_video.py`
+parameters: model path, device, base size, num buffers, background color,
+ffmpeg path, aspect-ratio / float32, and the `--pure_text` mode (runs each
+saved text prompt on every frame, SAM3 only) with its score threshold.
+
+### Queue & progress
+
+Submitted jobs run **one at a time, in order**, on a background worker thread.
+The queue lists every job with:
+
+- a status pill (`queued` / `loading` / `running` / `saving` / `done` /
+  `error` / `cancelled`),
+- a live progress bar + `frame N/total`,
+- the saved result path(s) once done, or the error message on failure.
+
+Folder batches are grouped under a header showing the folder name and clip
+count, so each clip's progress is individually visible. **Cancel** works on
+queued jobs (dropped) and running jobs (finishes the current frame, then stops
+without saving). **Clear finished** removes completed/failed/cancelled jobs
+from the list.
+
+Results are written to `<repo_root>/saved_images/run_video/<video_stem>/`
+(ffmpeg mp4 if an ffmpeg path is set, otherwise a PNG tarfile) — the same
+output layout as the script.
+
+### Segmentation API
+
+- `GET  /api/seg/queue` — queue + counts + progress
+- `POST /api/seg/submit` — `{kind, prompt_path, video_path|input_dir, config}`
+- `POST /api/seg/cancel` — `{job_id}`
+- `POST /api/seg/clear` — remove finished jobs
+- `GET  /api/seg/browse?path=&kind=pt|video|dir` — server path browser
+
 ## Files
 
-- `server.py` — stdlib HTTP server + session logic (mirrors the script 1:1)
+- `server.py` — stdlib HTTP server; authoring session + background
+  segmentation queue (both mirror the reference scripts)
 - `static/index.html`, `static/style.css`, `static/app.js` — the web page
 - `task.md` — task description
 

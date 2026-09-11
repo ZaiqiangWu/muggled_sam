@@ -13,6 +13,7 @@
 
 const state = {
   open: false,
+  view: "authoring",   // "authoring" | "segmentation" (both views stay mounted)
   cfg: null,
   model: { name: "-", version: null, device: "-", dtype: "-", tokens: "-" },
   video: { path: null, fps: 30, total_frames: 0, hw: null, use_webcam: false },
@@ -93,8 +94,10 @@ function appendLog(lines) {
 }
 
 function applyHideInfo(hide) {
-  $("header").style.display = hide ? "none" : "flex";
-  $("footer").style.display = hide ? "none" : "flex";
+  const onSeg = state.view === "segmentation";
+  const hideBars = onSeg || !!hide;
+  $("header").style.display = hideBars ? "none" : "flex";
+  $("footer").style.display = hideBars ? "none" : "flex";
 }
 
 // ------------------------------------------------------------------ rendering
@@ -1159,6 +1162,324 @@ async function pickUploadDir() {
   }
 }
 
+// ------------------------------------------------------------------ tab switching
+// Both views stay mounted in the DOM; switching only toggles visibility so
+// each interface's state (loaded video, prompts, queue, form fields) survives.
+
+function setView(view) {
+  state.view = view;
+  const isAuthoring = view === "authoring";
+  $("view-authoring").classList.toggle("active", isAuthoring);
+  $("view-segmentation").classList.toggle("active", !isAuthoring);
+  $("tab-authoring").classList.toggle("active", isAuthoring);
+  $("tab-segmentation").classList.toggle("active", !isAuthoring);
+  applyHideInfo(state.cfg ? state.cfg.hide_info : false);
+  if (isAuthoring) {
+    // Re-measure the authoring layout now that it is visible again.
+    requestAnimationFrame(() => {
+      syncMaskGridSize();
+      if (state.open) api("/api/frame").then(renderDisplay).catch(() => {});
+    });
+  }
+}
+
+// ------------------------------------------------------------------ video segmentation
+
+function escHtml(str) {
+  return String(str == null ? "" : str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function segStatusLabel(job) {
+  if (job.status === "running") {
+    if (job.phase === "loading") return "loading";
+    if (job.phase === "saving") return "saving";
+    return "running";
+  }
+  return job.status; // queued | done | error | cancelled
+}
+
+function segJobHtml(job) {
+  const cls = job.status; // queued|running|done|error|cancelled
+  const pct = Math.max(0, Math.min(100, (job.progress || 0) * 100));
+  let frames = "";
+  if (job.total_frames > 0) {
+    frames = `frame ${job.current_frame}/${job.total_frames}`;
+  } else if (job.status === "running") {
+    frames = job.phase === "loading" ? "loading\u2026" : "starting\u2026";
+  }
+  let resultsHtml = "";
+  if (job.saved_paths && job.saved_paths.length) {
+    resultsHtml = `<div class="seg-job-results">saved: ${job.saved_paths.map(escHtml).join(", ")}</div>`;
+  }
+  const errHtml = job.error ? `<div class="seg-job-err">${escHtml(job.error)}</div>` : "";
+  const canCancel = job.status === "queued" || job.status === "running";
+  const cancelBtn = canCancel
+    ? `<button class="seg-cancel danger" data-id="${escHtml(job.job_id)}">Cancel</button>` : "";
+  const statusLabel = segStatusLabel(job);
+  return `<div class="seg-job ${cls}">
+    <div class="seg-job-head">
+      <span class="seg-status ${cls}">${statusLabel}</span>
+      <span class="seg-job-label" title="${escHtml(job.video_path)}">${escHtml(job.label)}</span>
+      <span class="seg-job-frames">${frames}</span>
+      ${cancelBtn}
+    </div>
+    <div class="seg-prog"><div class="seg-prog-fill" style="width:${pct}%"></div></div>
+    ${job.message ? `<div class="seg-job-msg">${escHtml(job.message)}</div>` : ""}
+    ${errHtml}
+    ${resultsHtml}
+  </div>`;
+}
+
+function renderSegQueue(data) {
+  const list = $("seg-queue-list");
+  const scrollTop = list ? list.scrollTop : 0;
+  const jobs = (data && data.jobs) || [];
+  const c = (data && data.counts) || {};
+
+  // Summary line in the queue legend
+  const parts = [];
+  if (c.queued) parts.push(c.queued + " queued");
+  if (c.running) parts.push(c.running + " running");
+  if (c.done) parts.push(c.done + " done");
+  if (c.error) parts.push(c.error + " error");
+  if (c.cancelled) parts.push(c.cancelled + " cancelled");
+  $("seg-queue-summary").textContent = parts.length ? "— " + parts.join(", ") : "";
+
+  // Tab badge: show when there is active work
+  const activeCount = (c.queued || 0) + (c.running || 0);
+  const badge = $("tab-seg-badge");
+  if (badge) {
+    if (activeCount > 0) {
+      badge.style.display = "inline-block";
+      badge.textContent = String(activeCount);
+    } else {
+      badge.style.display = "none";
+    }
+  }
+
+  if (!list) return;
+  if (!jobs.length) {
+    list.innerHTML = '<div class="hint seg-empty">No tasks yet. Submit a task to begin.</div>';
+    list.scrollTop = scrollTop;
+    return;
+  }
+
+  const seenBatches = new Set();
+  let html = "";
+  for (const job of jobs) {
+    if (job.batch_id && !seenBatches.has(job.batch_id)) {
+      seenBatches.add(job.batch_id);
+      const n = jobs.filter((j) => j.batch_id === job.batch_id).length;
+      html += `<div class="seg-batch-head">
+        <span class="seg-batch-name">📁 ${escHtml(job.batch_label || "folder")}</span>
+        <span class="seg-batch-count">${n} video${n !== 1 ? "s" : ""}</span>
+        <span class="spacer"></span>
+      </div>`;
+    }
+    html += segJobHtml(job);
+  }
+  list.innerHTML = html;
+  list.scrollTop = scrollTop;
+
+  list.querySelectorAll(".seg-cancel").forEach((btn) => {
+    btn.onclick = () => cancelSegJob(btn.dataset.id);
+  });
+}
+
+async function pollSegStatus() {
+  try {
+    const data = await api("/api/seg/queue");
+    renderSegQueue(data);
+  } catch (err) {
+    /* server briefly busy - ignore */
+  }
+}
+
+function readSegConfig() {
+  return {
+    model_path: $("seg-model_path").value.trim() || null,
+    device: $("seg-device").value.trim() || null,
+    base_size_px: parseInt($("seg-base_size_px").value, 10),
+    num_buffers: parseInt($("seg-num_buffers").value, 10),
+    bg_color_hex: $("seg-bg_color_hex").value.trim() || "ff00ff00",
+    ffmpeg: $("seg-ffmpeg").value.trim() || null,
+    use_aspect_ratio: $("seg-use_aspect_ratio").checked,
+    use_float32: $("seg-use_float32").checked,
+    pure_text: $("seg-pure_text").checked,
+    pure_text_score_threshold: parseFloat($("seg-pt-score").value),
+  };
+}
+
+async function submitSegTask() {
+  const type = $("seg-type").value;
+  const prompt = $("seg-prompt").value.trim();
+  const video = $("seg-video").value.trim();
+  const dir = $("seg-dir").value.trim();
+  const hint = $("seg-submit-hint");
+  hint.style.color = "var(--danger)";
+
+  if (!prompt) { hint.textContent = "Pick a prompt (.pt) file"; return; }
+  const body = { kind: type, prompt_path: prompt, config: readSegConfig() };
+  if (type === "video") {
+    if (!video) { hint.textContent = "Pick an input video"; return; }
+    body.video_path = video;
+  } else {
+    if (!dir) { hint.textContent = "Pick a videos folder"; return; }
+    body.input_dir = dir;
+  }
+  hint.style.color = "var(--muted)";
+  hint.textContent = "Submitting\u2026";
+  try {
+    await withBusy("Submitting task\u2026", async () => {
+      const res = await api("/api/seg/submit", { method: "POST", body });
+      const n = (res.jobs || []).length;
+      toast(`Submitted ${n} job${n !== 1 ? "s" : ""} to the queue`);
+      await pollSegStatus();
+    });
+    hint.style.color = "var(--muted)";
+    hint.textContent = `Queued ${body.kind === "dir" ? "folder" : "video"}`;
+  } catch (err) {
+    hint.style.color = "var(--danger)";
+    hint.textContent = err.message || String(err);
+  }
+}
+
+async function cancelSegJob(jobId) {
+  try {
+    await api("/api/seg/cancel", { method: "POST", body: { job_id: jobId } });
+    await pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+async function clearSegDone() {
+  try {
+    await api("/api/seg/clear", { method: "POST", body: {} });
+    await pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+// ---- segmentation file/folder browse ----
+let segBrowseCtx = null; // { kind, targetId, currentPath, sel }
+
+function openSegBrowse(kind, targetId, startPath) {
+  segBrowseCtx = {
+    kind, targetId,
+    currentPath: (startPath && startPath.endsWith("/")) ? startPath :
+      (startPath ? startPath.replace(/\/[^\/]*$/, "") : ""),
+    sel: null,
+  };
+  const titles = {
+    pt: "Pick a prompt file (.pt)",
+    video: "Pick a video file",
+    dir: "Pick a videos folder",
+  };
+  $("seg-browse-title").textContent = titles[kind] || "Browse";
+  $("seg-browse-dialog").style.display = "flex";
+  loadSegDir(kind, segBrowseCtx.currentPath).catch((e) => toast(e.message, true));
+}
+
+async function loadSegDir(kind, path) {
+  const res = await api(
+    "/api/seg/browse?path=" + encodeURIComponent(path || "") + "&kind=" + kind
+  );
+  const list = $("seg-browse-list");
+  list.innerHTML = "";
+  $("seg-browse-selected").textContent = "nothing selected";
+  $("seg-browse-input").value = res.path;
+  if (segBrowseCtx) segBrowseCtx.currentPath = res.path;
+  if (segBrowseCtx) segBrowseCtx.sel = null;
+
+  const addEntry = (icon, name, isDir, fullPath) => {
+    const div = document.createElement("div");
+    div.className = "dir-entry" + (isDir ? " dir" : " file");
+    div.innerHTML = `<span class="icon">${icon}</span>${escHtml(name)}`;
+    div.onclick = () => {
+      if (isDir) {
+        if (kind === "dir") {
+          segBrowseCtx.sel = fullPath;
+        } else {
+          loadSegDir(kind, fullPath).catch((e) => toast(e.message, true));
+          return;
+        }
+      } else {
+        segBrowseCtx.sel = fullPath;
+      }
+      list.querySelectorAll(".dir-entry.selected").forEach((el) => el.classList.remove("selected"));
+      div.classList.add("selected");
+      $("seg-browse-selected").textContent = fullPath;
+    };
+    div.ondblclick = () => {
+      if (isDir && kind !== "dir") {
+        loadSegDir(kind, fullPath).catch((e) => toast(e.message, true));
+      } else {
+        confirmSegBrowse();
+      }
+    };
+    list.appendChild(div);
+  };
+
+  if (res.parent) addEntry("↰", ".. (up)", true, res.parent);
+  for (const e of res.entries) {
+    const isDir = e.is_dir === true;
+    const icon = isDir ? "📁" : (kind === "pt" ? "📦" : "🎬");
+    addEntry(icon, e.name, isDir, res.path + "/" + e.name);
+  }
+}
+
+function confirmSegBrowse() {
+  const ctx = segBrowseCtx;
+  if (!ctx) return;
+  let val;
+  if (ctx.kind === "dir") {
+    val = ctx.sel || ctx.currentPath;
+  } else {
+    val = ctx.sel; // must be an explicit file selection
+  }
+  if (!val) { toast("Select an item first", true); return; }
+  $(ctx.targetId).value = val;
+  $("seg-browse-dialog").style.display = "none";
+  ctx.sel = null;
+}
+
+function wireSeg() {
+  // tabs
+  $("tab-authoring").onclick = () => setView("authoring");
+  $("tab-segmentation").onclick = () => setView("segmentation");
+
+  // form
+  $("seg-type").onchange = () => {
+    const t = $("seg-type").value;
+    $("seg-video-field").style.display = t === "video" ? "" : "none";
+    $("seg-dir-field").style.display = t === "dir" ? "" : "none";
+  };
+  $("seg-submit").onclick = () => submitSegTask();
+  $("seg-prompt-browse").onclick = () => openSegBrowse("pt", "seg-prompt", $("seg-prompt").value);
+  $("seg-video-browse").onclick = () => openSegBrowse("video", "seg-video", $("seg-video").value);
+  $("seg-dir-browse").onclick = () => openSegBrowse("dir", "seg-dir", $("seg-dir").value);
+  $("seg-clear-done").onclick = () => clearSegDone();
+
+  // browse dialog
+  $("seg-browse-refresh").onclick = () => {
+    if (segBrowseCtx)
+      loadSegDir(segBrowseCtx.kind, $("seg-browse-input").value).catch((e) => toast(e.message, true));
+  };
+  $("seg-browse-input").addEventListener("keydown", (evt) => {
+    if (evt.key === "Enter" && segBrowseCtx)
+      loadSegDir(segBrowseCtx.kind, $("seg-browse-input").value).catch((e) => toast(e.message, true));
+  });
+  $("seg-browse-cancel").onclick = () => {
+    $("seg-browse-dialog").style.display = "none";
+    segBrowseCtx = null;
+  };
+  $("seg-browse-ok").onclick = confirmSegBrowse;
+}
+
 // ------------------------------------------------------------------ wiring
 
 function wire() {
@@ -1304,7 +1625,11 @@ function wire() {
 
 async function init() {
   wire();
+  wireSeg();
+  setView("authoring");
   await pollStatus();
+  pollSegStatus();
+  setInterval(pollSegStatus, 1500);
   // If a video is already open (e.g. right after a browser refresh), fetch the
   // current frame + mask previews once so the view isn't left black until the
   // next user action

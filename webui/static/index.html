@@ -15,7 +15,16 @@
     <span id="hdr-video" class="hdr-item hdr-path"></span>
   </header>
 
+  <!-- Top-level view tabs: switching keeps each view's state intact -->
+  <nav id="tabs">
+    <button id="tab-authoring" class="tab active">Prompt Authoring</button>
+    <button id="tab-segmentation" class="tab">Video Segmentation <span id="tab-seg-badge" class="tab-badge" style="display:none"></span></button>
+    <span class="spacer"></span>
+    <span id="tabs-hint" class="hint">each view keeps its own state</span>
+  </nav>
+
   <main id="main">
+    <div id="view-authoring" class="view active">
     <!-- ======================= Stage (video display) ======================= -->
     <section id="stage">
       <div id="video-row">
@@ -177,6 +186,94 @@
       <!-- Server log -->
       <div id="log" class="log"></div>
     </aside>
+    </div><!-- /#view-authoring -->
+
+    <!-- ======================= Video Segmentation view ======================= -->
+    <div id="view-segmentation" class="view">
+      <div class="seg-grid">
+        <!-- New task form -->
+        <div class="seg-col seg-col-form">
+          <fieldset>
+            <legend>New segmentation task</legend>
+
+            <div class="row">
+              <label>Task type
+                <select id="seg-type">
+                  <option value="video">Single video</option>
+                  <option value="dir">Video folder</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="seg-field">
+              <span class="seg-label">Prompt file (.pt)</span>
+              <div class="row">
+                <input type="text" id="seg-prompt" placeholder="server path to a tracking-state .pt file">
+                <button id="seg-prompt-browse">Browse</button>
+              </div>
+            </div>
+
+            <div class="seg-field" id="seg-video-field">
+              <span class="seg-label">Input video</span>
+              <div class="row">
+                <input type="text" id="seg-video" placeholder="server path to a video file">
+                <button id="seg-video-browse">Browse</button>
+              </div>
+            </div>
+
+            <div class="seg-field" id="seg-dir-field" style="display:none">
+              <span class="seg-label">Videos folder</span>
+              <div class="row">
+                <input type="text" id="seg-dir" placeholder="server path to a folder of .mp4 files">
+                <button id="seg-dir-browse">Browse</button>
+              </div>
+            </div>
+
+            <details id="seg-settings">
+              <summary>Settings (script parameters)</summary>
+              <div class="settings-grid">
+                <label>Model path (-m)<input type="text" id="seg-model_path" placeholder="./model_weights/sam3.pt"></label>
+                <label>Device (-d)<input type="text" id="seg-device" placeholder="cpu / cuda / mps"></label>
+                <label>Base size px (-b)<input type="number" id="seg-base_size_px" value="2048" min="128" step="128"></label>
+                <label>Num buffers (-n)<input type="number" id="seg-num_buffers" value="4" min="1" max="16"></label>
+                <label>Background color (-bg)<input type="text" id="seg-bg_color_hex" value="ff00ff00" placeholder="RGB / RGBA hex"></label>
+                <label>FFmpeg path (--ffmpeg)<input type="text" id="seg-ffmpeg" placeholder="leave empty to save tarfiles"></label>
+                <label>Pure-text score threshold<input type="number" id="seg-pt-score" value="0.5" step="0.05" min="0" max="1"></label>
+                <div class="checks">
+                  <label><input type="checkbox" id="seg-use_aspect_ratio" checked> Use aspect ratio (-ar)</label>
+                  <label><input type="checkbox" id="seg-use_float32"> Use float32 (-f32)</label>
+                  <label><input type="checkbox" id="seg-pure_text"> Pure text (--pure_text)</label>
+                </div>
+              </div>
+              <div class="hint" style="margin-top:6px">
+                Pure-text runs each saved text prompt on every frame (SAM3 only)
+                instead of video tracking.
+              </div>
+            </details>
+
+            <div class="row">
+              <button id="seg-submit" class="primary">Submit task</button>
+              <span id="seg-submit-hint" class="hint"></span>
+            </div>
+          </fieldset>
+        </div>
+
+        <!-- Queue / progress -->
+        <div class="seg-col seg-col-queue">
+          <fieldset>
+            <legend>Task queue <span id="seg-queue-summary" class="hint"></span></legend>
+            <div class="row">
+              <button id="seg-clear-done">Clear finished</button>
+              <span class="spacer"></span>
+              <span class="hint">jobs run one at a time, in order</span>
+            </div>
+            <div id="seg-queue-list" class="seg-queue-list">
+              <div class="hint seg-empty">No tasks yet. Submit a task to begin.</div>
+            </div>
+          </fieldset>
+        </div>
+      </div>
+    </div><!-- /#view-segmentation -->
   </main>
 
   <!-- Footer key help (hidden when 'hide info' is on) -->
@@ -238,6 +335,24 @@
         <span class="spacer"></span>
         <button id="btn-conflict-skip">Skip existing</button>
         <button id="btn-conflict-overwrite" class="primary">Overwrite</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Segmentation file/folder browse dialog (reused for .pt / video / dir) -->
+  <div id="seg-browse-dialog" class="modal" style="display:none">
+    <div class="modal-card">
+      <h2 id="seg-browse-title">Browse (on this server)</h2>
+      <div class="row">
+        <input type="text" id="seg-browse-input" size="48">
+        <button id="seg-browse-refresh">Refresh</button>
+      </div>
+      <div id="seg-browse-list" class="dir-list"></div>
+      <div class="row modal-actions">
+        <span id="seg-browse-selected" class="hint">nothing selected</span>
+        <span class="spacer"></span>
+        <button id="seg-browse-cancel">Cancel</button>
+        <button id="seg-browse-ok" class="primary">Select</button>
       </div>
     </div>
   </div>

@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Web UI for `save_prompts_run_video.py`
+Muggled SAM Web UI
 
-A single-file, dependency-free (Python stdlib only) HTTP server that reproduces
-the functionality and command-line parameters of `save_prompts_run_video.py`
-in a web page served on port 8765 (bound to 0.0.0.0 so any IP can connect).
+A single-file, dependency-free (Python stdlib only) HTTP server served on port
+8765 (bound to 0.0.0.0 so any IP can connect). The page has two tabs, both
+kept mounted so switching between them never loses state:
 
-Differences from the original script (per webui/task.md):
-  * `--input_video xxx.mp4` is replaced by an interactive "Open" button that
-    lets the user browse and pick a file on the server running this page.
-  * A "Save" button saves `./tracking_states/<video_stem>.pt` (repo root)
-    (in the script this happened automatically when the window closed).
+  * Prompt Authoring  - reproduces the functionality and command-line
+    parameters of `save_prompts_run_video.py`:
+      - `--input_video xxx.mp4` is replaced by an interactive "Open" button
+        that lets the user browse and pick a file on the server running this page.
+      - A "Save" button saves `./tracking_states/<video_stem>.pt` (repo root)
+        (in the script this happened automatically when the window closed).
+
+  * Video Segmentation  - a queued background runner that reproduces
+    `load_prompts_run_video.py` (single video) and `load_prompts_run_dir.py`
+    (a folder of .mp4 files). Each job applies a saved tracking-state (.pt)
+    file to a video and reports live per-frame progress. Jobs run one at a
+    time on a worker thread; the model is loaded once and reused per batch.
 
 Run from the repository root:
     python webui/server.py
@@ -20,9 +27,9 @@ then open http://<host>:8765/ in a browser (from any machine on the network).
 The server re-uses the exact model & helper code from the `muggled_sam`
 package (make_sam_from_state_dict, SAMVideoObjectResults, make_tracking_state,
 FrameCompositing, get_contours_from_mask, ReversibleLoopingVideoReader, ...)
-and follows the script's per-frame logic (prompt encode -> generate_masks,
-store -> initialize_video_masking, tracking -> step_video_masking, recording,
-buffer saving with ffmpeg/tar fallback) so results match the original.
+and follows the scripts' per-frame logic (prompt encode -> generate_masks /
+step_video_masking, recording, buffer saving with ffmpeg/tar fallback) so
+results match the originals.
 """
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -35,6 +42,7 @@ import os
 import os.path as osp
 import sys
 import threading
+import time
 import traceback
 from collections import deque
 from dataclasses import dataclass, field
@@ -57,15 +65,18 @@ from muggled_sam.demo_helpers.ui.helpers.images import (  # noqa: E402
     CheckerPattern,
     get_image_hw_for_max_side_length,
 )
-from muggled_sam.demo_helpers.shared_ui_layout import BaseUIControl  # noqa: E402
+from muggled_sam.demo_helpers.shared_ui_layout import (  # noqa: E402
+    BaseUIControl,
+    make_hires_mask_uint8,
+)
 from muggled_sam.demo_helpers.misc import (  # noqa: E402
     PeriodicVRAMReport,
     make_device_config,
     get_default_device_string,
 )
 from muggled_sam.demo_helpers.contours import get_contours_from_mask, pixelize_contours  # noqa: E402
-from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults  # noqa: E402
-from muggled_sam.demo_helpers.video_prompt_state import make_tracking_state  # noqa: E402
+from muggled_sam.demo_helpers.video_data_storage import SAMVideoObjectResults, SAMVideoBuffer  # noqa: E402
+from muggled_sam.demo_helpers.video_prompt_state import make_tracking_state, unpack_tracking_state  # noqa: E402
 from muggled_sam.demo_helpers.saving import save_video_frames, get_save_name  # noqa: E402
 from muggled_sam.demo_helpers.ffmpeg import (  # noqa: E402
     get_default_ffmpeg_command,
@@ -1537,6 +1548,647 @@ SESSION = Session()
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# %% Video Segmentation task queue (Task 2)
+#
+# Background queue that runs `load_prompts_run_video.py`-equivalent segmentation
+# jobs. Each queued job segments ONE video using a saved tracking-state (.pt)
+# file. A "folder" submission expands into one job per .mp4 (exactly like
+# load_prompts_run_dir.py, which shells out to load_prompts_run_video.py per clip).
+#
+# A single worker thread drains the queue so jobs run one at a time (queued),
+# and each job reports live per-frame progress. The model is loaded once and
+# cached per (model_path, device, float32) so a whole folder reuses one model.
+
+
+DEFAULT_SEG_MODEL_PATH = None
+DEFAULT_SEG_DEVICE = get_default_device_string()
+DEFAULT_SEG_BASE_SIZE = DEFAULT_BASE_SIZE
+DEFAULT_SEG_NUM_BUFFERS = DEFAULT_NUM_OBJECT_BUFFERS
+DEFAULT_SEG_BG_COLOR_HEX = DEFAULT_BG_COLOR_HEX
+DEFAULT_SEG_PURE_TEXT_SCORE_THRESHOLD = 0.5
+
+
+def _seg_default_config():
+    """Default segmentation config (mirrors load_prompts_run_video.py defaults)."""
+    return {
+        "model_path": DEFAULT_MODEL_FILE,   # -m (script hard-codes sam3.pt when unset)
+        "device": DEFAULT_SEG_DEVICE,        # -d
+        "use_float32": False,                # -f32
+        "use_aspect_ratio": True,            # -ar
+        "base_size_px": DEFAULT_SEG_BASE_SIZE,   # -b
+        "num_buffers": DEFAULT_SEG_NUM_BUFFERS,  # -n
+        "bg_color_hex": DEFAULT_SEG_BG_COLOR_HEX,  # -bg
+        "ffmpeg": None,                      # --ffmpeg
+        "pure_text": False,                  # --pure_text
+        "pure_text_score_threshold": DEFAULT_SEG_PURE_TEXT_SCORE_THRESHOLD,
+    }
+
+
+def _normalize_seg_config(cfg: dict) -> dict:
+    """Fill in any missing segmentation config keys with defaults, then coerce types."""
+    base = _seg_default_config()
+    for key, value in base.items():
+        if key not in cfg or cfg[key] in (None, ""):
+            cfg[key] = value
+    # Coerce numeric / bool fields
+    cfg["use_float32"] = bool(cfg.get("use_float32"))
+    cfg["use_aspect_ratio"] = bool(cfg.get("use_aspect_ratio"))
+    cfg["pure_text"] = bool(cfg.get("pure_text"))
+    try:
+        cfg["base_size_px"] = int(cfg.get("base_size_px") or DEFAULT_SEG_BASE_SIZE)
+    except (TypeError, ValueError):
+        cfg["base_size_px"] = DEFAULT_SEG_BASE_SIZE
+    try:
+        cfg["num_buffers"] = max(1, int(cfg.get("num_buffers") or DEFAULT_SEG_NUM_BUFFERS))
+    except (TypeError, ValueError):
+        cfg["num_buffers"] = DEFAULT_SEG_NUM_BUFFERS
+    try:
+        cfg["pure_text_score_threshold"] = float(
+            cfg.get("pure_text_score_threshold") or DEFAULT_SEG_PURE_TEXT_SCORE_THRESHOLD
+        )
+    except (TypeError, ValueError):
+        cfg["pure_text_score_threshold"] = DEFAULT_SEG_PURE_TEXT_SCORE_THRESHOLD
+    cfg["model_path"] = str(cfg.get("model_path") or DEFAULT_MODEL_FILE)
+    cfg["device"] = str(cfg.get("device") or DEFAULT_SEG_DEVICE)
+    cfg["bg_color_hex"] = str(cfg.get("bg_color_hex") or DEFAULT_SEG_BG_COLOR_HEX)
+    cfg["ffmpeg"] = (str(cfg["ffmpeg"]) if cfg.get("ffmpeg") else None)
+    return cfg
+
+
+class SegJob:
+    """One queued video-segmentation job (a single input video + prompt file)."""
+
+    def __init__(self, job_id, kind, prompt_path, video_path, config,
+                 batch_id=None, batch_label=None):
+        self.job_id = job_id
+        self.kind = kind                      # "video"
+        self.prompt_path = prompt_path        # .pt file (as given)
+        self.video_path = video_path          # input video (as given / resolved)
+        self.config = config                  # normalized dict
+        self.batch_id = batch_id              # groups a folder's jobs (None for singles)
+        self.batch_label = batch_label        # folder name for folder batches
+        self.label = osp.basename(video_path)
+        # runtime state (mutated by the worker)
+        self.status = "queued"                # queued | running | done | error | cancelled
+        self.phase = "waiting"                # waiting | loading | running | saving
+        self.current_frame = 0
+        self.total_frames = 0
+        self.message = ""
+        self.error = None
+        self.saved_paths = []
+        self.created_at = time.time()
+        self.started_at = None
+        self.finished_at = None
+        self._cancel_requested = False
+
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    def cancel_requested(self):
+        return self._cancel_requested
+
+    def to_dict(self):
+        elapsed = None
+        if self.started_at is not None:
+            end = self.finished_at if self.finished_at is not None else time.time()
+            elapsed = round(end - self.started_at, 1)
+        progress = (self.current_frame / self.total_frames) if self.total_frames > 0 else 0.0
+        return {
+            "job_id": self.job_id,
+            "kind": self.kind,
+            "batch_id": self.batch_id,
+            "batch_label": self.batch_label,
+            "label": self.label,
+            "prompt_path": self.prompt_path,
+            "video_path": self.video_path,
+            "status": self.status,
+            "phase": self.phase,
+            "current_frame": self.current_frame,
+            "total_frames": self.total_frames,
+            "progress": progress,
+            "message": self.message,
+            "error": self.error,
+            "saved_paths": list(self.saved_paths),
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "elapsed": elapsed,
+        }
+
+
+class SegmentationQueue:
+    """Thread-safe FIFO queue + single worker running segmentation jobs."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._cond = threading.Condition(self._lock)
+        self._jobs = []           # all jobs, submission order
+        self._by_id = {}
+        self._pending = deque()   # queued job_ids in FIFO order
+        self._worker = None
+        self._counter = 0
+        # cached model
+        self._model = None
+        self._model_key = None
+        self._model_name = None
+
+    # ------------------------------------------------------------- lifecycle
+    def start(self):
+        with self._lock:
+            if self._worker is None:
+                self._worker = threading.Thread(
+                    target=self._worker_loop, name="seg-queue-worker", daemon=True
+                )
+                self._worker.start()
+
+    # ------------------------------------------------------------- helpers
+    def _next_id(self, prefix):
+        self._counter += 1
+        return f"{prefix}{self._counter}"
+
+    @staticmethod
+    def _resolve_path(path):
+        path = os.path.expanduser(str(path))
+        if not osp.isabs(path):
+            cwd_path = osp.abspath(path)
+            if osp.exists(cwd_path):
+                return cwd_path
+            return osp.join(_REPO_ROOT, path)
+        return path
+
+    def _get_model(self, model_path, device_str, use_float32):
+        key = (str(model_path), str(device_str), bool(use_float32))
+        if self._model is not None and self._model_key == key:
+            return self._model, self._model_name
+        # (re)load
+        if self._model is not None:
+            del self._model
+            self._model = None
+        device_config_dict = make_device_config(device_str, use_float32)
+        model_config_dict, model = make_sam_from_state_dict(model_path)
+        assert model.name in ("samv2", "samv3"), "Only SAMv2/v3 models are supported!"
+        model.to(**device_config_dict)
+        self._model = model
+        self._model_key = key
+        self._model_name = model.name
+        return model, model.name
+
+    # ------------------------------------------------------------- submission
+    def submit(self, kind, prompt_path, video_path=None, input_dir=None, config=None):
+        """Queue a segmentation task. kind: 'video' or 'dir'. Returns created jobs."""
+        if not prompt_path or not str(prompt_path).strip():
+            raise ValueError("A prompt (.pt) file path is required")
+        prompt_path = self._resolve_path(str(prompt_path))
+        if not osp.isfile(prompt_path):
+            raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
+
+        cfg = _normalize_seg_config(dict(config) if config else {})
+
+        with self._lock:
+            batch_id = None
+            created = []
+            if kind == "video":
+                if not video_path or not str(video_path).strip():
+                    raise ValueError("A video file path is required for a single-video task")
+                vpath = self._resolve_path(str(video_path))
+                if osp.isdir(vpath):
+                    raise IsADirectoryError(f"That is a folder, not a video file: {vpath}")
+                if not osp.isfile(vpath):
+                    raise FileNotFoundError(f"Video file not found: {vpath}")
+                job = SegJob(
+                    job_id=self._next_id("j"), kind="video", prompt_path=prompt_path,
+                    video_path=vpath, config=cfg,
+                )
+                self._register(job)
+                created.append(job)
+            elif kind == "dir":
+                if not input_dir or not str(input_dir).strip():
+                    raise ValueError("A videos folder path is required for a folder task")
+                dpath = self._resolve_path(str(input_dir))
+                if not osp.isdir(dpath):
+                    raise NotADirectoryError(f"Not a directory: {dpath}")
+                video_names = sorted(
+                    n for n in os.listdir(dpath)
+                    if n.lower().endswith(".mp4") and osp.isfile(osp.join(dpath, n))
+                )
+                if not video_names:
+                    raise ValueError(f"No .mp4 videos found in {dpath}")
+                batch_id = self._next_id("b")
+                batch_label = osp.basename(osp.normpath(dpath)) or dpath
+                for name in video_names:
+                    job = SegJob(
+                        job_id=self._next_id("j"), kind="video", prompt_path=prompt_path,
+                        video_path=osp.join(dpath, name), config=cfg,
+                        batch_id=batch_id, batch_label=batch_label,
+                    )
+                    self._register(job)
+                    created.append(job)
+            else:
+                raise ValueError(f"Unknown task kind: {kind!r}")
+            self._cond.notify_all()
+
+        return [j.to_dict() for j in created]
+
+    def _register(self, job):
+        self._jobs.append(job)
+        self._by_id[job.job_id] = job
+        self._pending.append(job.job_id)
+        # Keep the UI list bounded: trim oldest finished jobs beyond a cap.
+        self._trim_locked()
+
+    def _trim_locked(self):
+        cap = 200
+        finished = [j for j in self._jobs if j.status in ("done", "error", "cancelled")]
+        if len(finished) > cap:
+            # remove oldest finished (front of list) beyond the cap
+            to_remove = set()
+            seen = 0
+            for j in self._jobs:
+                if j.status in ("done", "error", "cancelled"):
+                    seen += 1
+                    if seen > cap:
+                        to_remove.add(j.job_id)
+            if to_remove:
+                self._jobs = [j for j in self._jobs if j.job_id not in to_remove]
+                for jid in to_remove:
+                    self._by_id.pop(jid, None)
+                    while self._pending and self._pending[0] == jid:
+                        self._pending.popleft()
+
+    # ------------------------------------------------------------- queries
+    def status(self):
+        with self._lock:
+            jobs = [j.to_dict() for j in self._jobs]
+            counts = {"queued": 0, "running": 0, "done": 0, "error": 0, "cancelled": 0}
+            for j in self._jobs:
+                counts[j.status] = counts.get(j.status, 0) + 1
+        return {"jobs": jobs, "counts": counts, "is_busy": counts["running"] > 0}
+
+    def cancel(self, job_id):
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.finished_at = time.time()
+                job.message = "Cancelled (was queued)"
+                # drop from pending if still there
+                try:
+                    self._pending.remove(job_id)
+                except ValueError:
+                    pass
+            elif job.status == "running":
+                job.request_cancel()
+                job.message = "Cancellation requested (finishing current frame)"
+            else:
+                raise ValueError(f"Job is {job.status}; cannot cancel")
+            self._cond.notify_all()
+        return job.to_dict()
+
+    def clear_finished(self):
+        with self._lock:
+            before = len(self._jobs)
+            self._jobs = [j for j in self._jobs if j.status in ("queued", "running")]
+            self._by_id = {j.job_id: j for j in self._jobs}
+            self._pending = deque(j.job_id for j in self._jobs if j.status == "queued")
+            removed = before - len(self._jobs)
+        return {"removed": removed}
+
+    # ------------------------------------------------------------- worker
+    def _worker_loop(self):
+        while True:
+            with self._cond:
+                while not self._pending:
+                    self._cond.wait()
+                job_id = self._pending.popleft()
+                job = self._by_id.get(job_id)
+                if job is None or job.status != "queued":
+                    continue
+                job.status = "running"
+                job.started_at = time.time()
+                job.phase = "loading"
+            try:
+                self._run_job(job)
+            except Exception as err:  # noqa: BLE001
+                with self._lock:
+                    if job.status == "running":
+                        job.status = "error"
+                        job.error = f"{type(err).__name__}: {err}"
+                        job.finished_at = time.time()
+                traceback.print_exc()
+            with self._cond:
+                self._cond.notify_all()
+
+    # ------------------------------------------------------------- run one job
+    def _run_job(self, job):
+        cfg = job.config
+        # 1) model
+        model, model_name = self._get_model(
+            cfg["model_path"], cfg["device"], cfg["use_float32"]
+        )
+        device = cfg["device"]
+
+        # 2) video
+        vreader = ReversibleLoopingVideoReader(job.video_path)
+        video_fps = vreader.get_fps() or 30.0
+        total_frames = int(vreader.total_frames or 0)
+
+        with self._lock:
+            job.total_frames = total_frames
+            job.current_frame = 0
+            job.message = f"Loading prompts from {osp.basename(job.prompt_path)}..."
+
+        # 3) prompt state
+        torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer, deque])
+        loaded_data = torch.load(job.prompt_path, map_location=device, weights_only=False)
+        loaded_objects, saved_text_prompts = unpack_tracking_state(loaded_data)
+
+        num_obj_buffers = int(cfg["num_buffers"])
+        use_pure_text = bool(cfg["pure_text"])
+        pure_text_score_threshold = float(cfg["pure_text_score_threshold"])
+
+        if use_pure_text:
+            if model_name != "samv3":
+                raise ValueError("--pure_text requires SAM3 model weights")
+            if not saved_text_prompts:
+                raise ValueError("Prompt file has no per-buffer text prompts for --pure_text")
+            for objidx in saved_text_prompts:
+                if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
+                    raise ValueError(
+                        f"Prompt file contains invalid text-prompt buffer index: {objidx!r}"
+                    )
+
+        # rebuild memory_list
+        memory_list = [None] * num_obj_buffers
+        for objidx, mem in loaded_objects.items():
+            if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
+                raise ValueError(f"Prompt file contains invalid object-buffer index: {objidx!r}")
+            memory_list[objidx] = mem
+
+        with self._lock:
+            if use_pure_text:
+                job.message = (
+                    f"Pure-text mode: {len(saved_text_prompts)} prompt(s), "
+                    f"score >= {pure_text_score_threshold}"
+                )
+            elif not any(m is not None and m.check_has_prompts() for m in memory_list):
+                job.status = "done"
+                job.phase = "idle"
+                job.message = "No valid prompts found in the .pt file - nothing to segment."
+                job.finished_at = time.time()
+            else:
+                self._move_memory_to_device(memory_list, device)
+                job.message = f"Segmenting {total_frames} frames..."
+
+        # Early exit: nothing to segment
+        with self._lock:
+            if job.status != "running":
+                vreader.release()
+                return
+
+        # 4) masking + ffmpeg + encoder config
+        mask_color_bgra = FrameCompositing.parse_hex_color(cfg["bg_color_hex"])
+        save_masking = FrameCompositing(mask_color_bgra)
+        use_ffmpeg, ffmpeg_path = verify_ffmpeg_path(cfg.get("ffmpeg"))
+        imgenc_config_dict = {
+            "max_side_length": int(cfg["base_size_px"]),
+            "use_square_sizing": not bool(cfg["use_aspect_ratio"]),
+        }
+
+        detector_model = model.make_detector_model() if use_pure_text else None
+        objiter = list(range(num_obj_buffers))
+        savebuffers_list = [SaveBufferData.create() for _ in objiter]
+
+        vreader.pause(False)
+        prev_real_idx = -1
+
+        def _cancelled():
+            return job._cancel_requested
+
+        def _tick(n):
+            with self._lock:
+                if job.status == "running":
+                    job.phase = "running"
+                    job.current_frame = n
+                    if total_frames > 0:
+                        job.message = (
+                            f"Segmenting frame {n}/{total_frames} "
+                            f"({100.0 * n / total_frames:.0f}%)"
+                        )
+
+        with torch.inference_mode():
+            for is_paused, frame_idx, frame in vreader:
+                if _cancelled():
+                    break
+                real_frame_idx = frame_idx - 1
+                if real_frame_idx < 0:
+                    continue
+                if real_frame_idx < prev_real_idx:
+                    break
+                prev_real_idx = real_frame_idx
+
+                if use_pure_text:
+                    self._seg_pure_text_frame(
+                        detector_model, save_masking, saved_text_prompts,
+                        imgenc_config_dict, pure_text_score_threshold,
+                        savebuffers_list, frame, real_frame_idx,
+                    )
+                else:
+                    self._seg_track_frame(
+                        model, memory_list, objiter, save_masking,
+                        imgenc_config_dict, savebuffers_list, frame,
+                        frame_idx, real_frame_idx,
+                    )
+                _tick(real_frame_idx + 1)
+
+        # 5) save buffered results (skip if cancelled)
+        cancelled = _cancelled()
+        with self._lock:
+            if cancelled:
+                job.status = "cancelled"
+                job.phase = "idle"
+                job.message = "Cancelled"
+                job.finished_at = time.time()
+            else:
+                job.phase = "saving"
+                job.message = "Saving segmentation results..."
+
+        if not cancelled:
+            with self._lock:
+                job.saved_paths = self._save_results(
+                    job.video_path, video_fps, savebuffers_list,
+                    ffmpeg_path, use_ffmpeg,
+                )
+            with self._lock:
+                job.status = "done"
+                job.phase = "idle"
+                n_saved = len(job.saved_paths)
+                job.message = (
+                    f"Done. Saved {n_saved} result file(s)."
+                    if n_saved else "Done. (no tracked objects produced output)"
+                )
+                job.finished_at = time.time()
+        else:
+            job.saved_paths = []
+        try:
+            vreader.release()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ------------------------------------------------------------- per-frame helpers
+    @staticmethod
+    def _move_memory_to_device(memory_list, device):
+        for mem in memory_list:
+            if mem is None:
+                continue
+            if hasattr(mem, "mem_encs"):
+                mem.mem_encs = [t.to(device) for t in mem.mem_encs]
+            if hasattr(mem, "obj_ptrs"):
+                mem.obj_ptrs = [t.to(device) for t in mem.obj_ptrs]
+            if hasattr(mem, "mask_preds"):
+                mem.mask_preds = [t.to(device) for t in mem.mask_preds]
+
+    def _seg_track_frame(self, model, memory_list, objiter, save_masking,
+                         imgenc_config_dict, savebuffers_list, frame,
+                         frame_idx, real_frame_idx):
+        encoded_img, _, _ = model.encode_image(frame, **imgenc_config_dict)
+        for objidx in objiter:
+            if not memory_list[objidx]:
+                continue
+            if not memory_list[objidx].check_has_prompts():
+                continue
+            obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = model.step_video_masking(
+                encoded_img, **memory_list[objidx].to_dict()
+            )
+            tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
+            # store history for the next frame
+            memory_list[objidx].store_frame_result(frame_idx, mem_enc, obj_ptr)
+            save_mask = BaseUIControl.create_hires_mask_uint8(
+                mask_preds, tracked_mask_idx, frame.shape[0:2]
+            )
+            save_frame = save_masking.mask_frame(frame, save_mask)
+            ok, png = cv2.imencode(".png", save_frame)
+            if ok:
+                savebuffers_list[objidx].png_per_frame_dict[real_frame_idx] = png
+
+    def _seg_pure_text_frame(self, detector_model, save_masking, saved_text_prompts,
+                             imgenc_config_dict, pure_text_score_threshold,
+                             savebuffers_list, frame, real_frame_idx):
+        detection_img, _, _ = detector_model.encode_detection_image(
+            frame, **imgenc_config_dict
+        )
+        mask_by_text_prompt = {}
+        black_png = None
+        for objidx, text_prompt in saved_text_prompts.items():
+            if text_prompt not in mask_by_text_prompt:
+                encoded_exemplars = detector_model.encode_exemplars(
+                    detection_img, text=text_prompt
+                )
+                detection_results = detector_model.generate_detections(
+                    detection_img, encoded_exemplars
+                )
+                detected_masks, _, detected_scores, _ = detector_model.filter_results(
+                    *detection_results, score_threshold=pure_text_score_threshold
+                )
+                if detected_masks is None or detected_masks.shape[0] == 0:
+                    mask_by_text_prompt[text_prompt] = None
+                else:
+                    best_detection_idx = int(detected_scores.flatten().argmax())
+                    mask_by_text_prompt[text_prompt] = make_hires_mask_uint8(
+                        detected_masks[best_detection_idx], frame.shape[0:2]
+                    )
+            save_mask = mask_by_text_prompt[text_prompt]
+            if save_mask is None:
+                if black_png is None:
+                    empty_mask = np.zeros(frame.shape[0:2], dtype=np.uint8)
+                    black_frame = np.zeros_like(save_masking.mask_frame(frame, empty_mask))
+                    if black_frame.ndim == 3 and black_frame.shape[2] == 4:
+                        black_frame[:, :, 3] = 255
+                    ok, black_png = cv2.imencode(".png", black_frame)
+                    if not ok:
+                        black_png = None
+                if black_png is not None:
+                    savebuffers_list[objidx].png_per_frame_dict[real_frame_idx] = black_png
+            else:
+                save_frame = save_masking.mask_frame(frame, save_mask)
+                ok, png = cv2.imencode(".png", save_frame)
+                if ok:
+                    savebuffers_list[objidx].png_per_frame_dict[real_frame_idx] = png
+
+    def _save_results(self, video_path, video_fps, savebuffers_list, ffmpeg_path, use_ffmpeg):
+        """Save each object's buffered frames (ffmpeg mp4, tar fallback). Returns paths."""
+        saved = []
+        for objidx, savebuffer in enumerate(savebuffers_list):
+            png_per_frame_dict = savebuffer.png_per_frame_dict
+            if len(png_per_frame_dict) == 0:
+                continue
+            save_folder, save_idx = get_save_name(video_path, "run_video")
+            min_fidx, max_fidx = min(png_per_frame_dict.keys()), max(png_per_frame_dict.keys())
+            save_name = f"{save_idx}_obj{1 + objidx}_{min_fidx}_to_{max_fidx}_frames"
+            save_path_no_ext = osp.join(save_folder, save_name)
+            saved_path = None
+            if use_ffmpeg:
+                ok_save, save_path = save_video_stream(
+                    ffmpeg_path, save_path_no_ext, video_fps, png_per_frame_dict,
+                    print_progress_indicator=False,
+                )
+                if ok_save:
+                    saved_path = save_path
+                else:
+                    use_ffmpeg = False  # fall back to tarfile for subsequent objects
+            if not use_ffmpeg:
+                saved_path = save_video_frames(save_path_no_ext, png_per_frame_dict)
+            if saved_path:
+                saved.append(saved_path)
+        return saved
+
+
+
+# Global segmentation queue (single worker; started in main())
+SEG_QUEUE = SegmentationQueue()
+
+
+SEG_PT_EXTS = {".pt", ".pth", ".bin", ".ckpt"}
+
+
+def list_dir_seg(base_path, kind="video"):
+    """List directories + files for the segmentation browse dialog.
+
+    kind:
+      'pt'    -> subdirectories + .pt/.pth model/state files
+      'video' -> subdirectories + video files
+      'dir'   -> subdirectories only (for picking a videos folder)
+    """
+    base_path = SESSION._resolve_path(base_path) if base_path else os.getcwd()
+    if not osp.isdir(base_path):
+        raise FileNotFoundError(f"Not a directory: {base_path}")
+    entries = []
+    for name in sorted(os.listdir(base_path), key=str.lower):
+        if name.startswith("."):
+            continue
+        full = osp.join(base_path, name)
+        if osp.isdir(full):
+            entries.append({"name": name, "is_dir": True})
+        else:
+            ext = osp.splitext(name)[1].lower()
+            if kind == "pt" and ext in SEG_PT_EXTS:
+                entries.append({"name": name, "is_dir": False})
+            elif kind == "video" and ext in VIDEO_EXTS:
+                entries.append({"name": name, "is_dir": False})
+            elif kind == "dir":
+                pass  # only directories
+            else:
+                entries.append({"name": name, "is_dir": False})
+    parent = osp.dirname(base_path)
+    return {
+        "path": base_path,
+        "parent": parent if parent != base_path else None,
+        "entries": entries,
+    }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # %% File browser helper
 
 
@@ -1737,6 +2389,12 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/frame":
             advance = (qs.get("advance") or ["0"])[0] in ("1", "true", "True")
             return self._send_json(self.session.display(advance=advance))
+        if route == "/api/seg/queue":
+            return self._send_json(SEG_QUEUE.status())
+        if route == "/api/seg/browse":
+            path = (qs.get("path") or [""])[0]
+            kind = (qs.get("kind") or ["video"])[0]
+            return self._send_json({"ok": True, **list_dir_seg(path, kind)})
         self._send_json({"ok": False, "error": f"No such route: {route}"}, status=404)
 
     # --- POST routes --------------------------------------------------------
@@ -1802,6 +2460,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True, "path": dest})
         if route == "/api/upload_file":
             return self._send_json(self._api_upload_file())
+        if route == "/api/seg/submit":
+            jobs = SEG_QUEUE.submit(
+                body.get("kind", "video"),
+                prompt_path=body.get("prompt_path"),
+                video_path=body.get("video_path"),
+                input_dir=body.get("input_dir"),
+                config=body.get("config"),
+            )
+            return self._send_json({"ok": True, "jobs": jobs})
+        if route == "/api/seg/cancel":
+            job = SEG_QUEUE.cancel(body.get("job_id"))
+            return self._send_json({"ok": True, "job": job})
+        if route == "/api/seg/clear":
+            return self._send_json({"ok": True, **SEG_QUEUE.clear_finished()})
         self._send_json({"ok": False, "error": f"No such route: {route}"}, status=404)
 
     # --- verb entrypoints ----------------------------------------------------
@@ -1837,7 +2509,9 @@ def _ensure_self_signed(cert_path, key_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Web UI for save_prompts_run_video.py")
+    parser = argparse.ArgumentParser(
+        description="Muggled SAM Web UI (Prompt Authoring + Video Segmentation)"
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help=f"Port to serve on (default: {DEFAULT_PORT})")
     parser.add_argument("--host", type=str, default=DEFAULT_HOST,
@@ -1851,6 +2525,9 @@ def main():
     # Run from the repo root so relative paths (./model_weights, ./tracking_states)
     # behave exactly like in the original script
     os.chdir(_REPO_ROOT)
+
+    # Start the background video-segmentation task queue (Task 2)
+    SEG_QUEUE.start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
@@ -1874,6 +2551,7 @@ def main():
     print(f"  Repo root: {_REPO_ROOT}")
     print(f"  Tracking state saves go to: {STATE_SAVE_DIR}/<video_stem>.pt")
     print(f"  Uploaded video folders go to: {UPLOAD_ROOT}/<folder_name>/")
+    print(f"  Segmentation results go to: <repo_root>/saved_images/run_video/<video_stem>/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
