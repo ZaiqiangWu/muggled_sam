@@ -269,6 +269,21 @@ input[type="range"] { width: 100%; }
 .modal-card h2 { margin: 0; font-size: 15px; }
 .modal-actions { justify-content: flex-end; }
 
+/* upload progress bar */
+#upload-progress-bar {
+  height: 10px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+#upload-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+
 .dir-list {
   border: 1px solid var(--border);
   border-radius: 6px;

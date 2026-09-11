@@ -53,7 +53,11 @@
         <button id="btn-open" class="primary">Open</button>
         <button id="btn-save" class="primary">Save</button>
         <button id="btn-close" class="danger" disabled>Close</button>
+        <button id="btn-upload-dir" style="margin-left:16px"
+          title="Pick a local folder and upload its video files (video extensions only) to the server's videos/ folder">Upload video dir</button>
       </div>
+      <!-- hidden input for the webkitdirectory fallback (non-Chromium browsers) -->
+      <input type="file" id="upload-dir-input" webkitdirectory directory multiple style="display:none">
 
       <!-- Playback -->
       <fieldset>
@@ -198,6 +202,21 @@
         <span class="spacer"></span>
         <button id="btn-dir-cancel">Cancel</button>
         <button id="btn-dir-open" class="primary">Open</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Upload video dir progress dialog -->
+  <div id="upload-dialog" class="modal" style="display:none">
+    <div class="modal-card">
+      <h2>Upload video folder</h2>
+      <div id="upload-status" class="hint">Starting...</div>
+      <div id="upload-progress-bar"><div id="upload-progress-fill"></div></div>
+      <div class="row modal-actions">
+        <span id="upload-dest" class="hint"></span>
+        <span class="spacer"></span>
+        <button id="btn-upload-cancel">Cancel</button>
+        <button id="btn-upload-close" class="primary" disabled>Close</button>
       </div>
     </div>
   </div>

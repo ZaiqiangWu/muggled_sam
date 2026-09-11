@@ -42,6 +42,7 @@ exactly like in the script:
 - model weights: `./model_weights/sam3.pt` (override with `Model path` in Settings)
 - saved tracking state: `./tracking_states/<video_stem>.pt` (repo root, folder created on demand)
 - saved buffer recordings: `./saved_images/run_video/...`
+- uploaded video folders: `./videos/<picked folder name>/` (folder created on demand)
 
 ## Usage (mirrors the script's UI)
 
@@ -67,7 +68,15 @@ exactly like in the script:
    **Enable Recording** records the masked frames of tracked buffers into
    memory; **Save Buffer** writes them out (ffmpeg mp4 if an ffmpeg path is
    configured, otherwise a tarfile of PNGs), and **Clear Buffer** wipes them.
-6. **Save** (or `g`) writes `./tracking_states/<video_stem>.pt` with the
+6. **Upload video dir** (right of Open/Save/Close): opens a local folder
+   picker (folders only, Chromium `showDirectoryPicker`, `webkitdirectory`
+   input fallback), filters the folder's contents to video files
+   (recursively, same extension list as the Open dialog, non-video files are
+   skipped), and uploads them — preserving the folder's internal structure —
+   to `./videos/<picked folder name>/` on the server. A progress dialog shows
+   per-file progress and supports Cancel (an interrupted file is not kept).
+   Afterwards use **Open** and browse into `videos/` to pick an uploaded clip.
+7. **Save** (or `g`) writes `./tracking_states/<video_stem>.pt` with the
    tracking state of every buffer that has prompts (plus their text
    prompts).
    **Close** (`q`) saves state first, then releases the video — the same as

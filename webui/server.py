@@ -98,6 +98,30 @@ DEFAULT_FFMPEG = get_default_ffmpeg_command()
 # e.g. clip.mp4 -> tracking_states/clip.pt (webcam -> tracking_states/webcam.pt).
 DEFAULT_MODEL_FILE = osp.join(_REPO_ROOT, "model_weights", "sam3.pt")
 STATE_SAVE_DIR = osp.join(_REPO_ROOT, "tracking_states")
+# 'Upload video dir' destination: <repo_root>/videos/<picked folder name>/...
+UPLOAD_ROOT = osp.join(_REPO_ROOT, "videos")
+_UPLOAD_LOCK = threading.Lock()
+
+
+def _validate_upload_dirname(name):
+    """Single, safe path component for the picked folder (no traversal)."""
+    name = str(name or "").strip()
+    if not name or name in (".", "..") or len(name) > 128:
+        raise ValueError(f"Invalid upload folder name: {name!r}")
+    if "/" in name or "\\" in name or "\0" in name:
+        raise ValueError(f"Invalid upload folder name: {name!r}")
+    return name
+
+
+def _validate_upload_relpath(rel):
+    """Relative file path inside the picked folder (no traversal/abs paths)."""
+    rel = str(rel or "").replace("\\", "/").strip().lstrip("/")
+    if not rel or len(rel) > 512 or "\0" in rel:
+        raise ValueError(f"Invalid upload file path: {rel!r}")
+    parts = rel.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"Invalid upload file path: {rel!r}")
+    return "/".join(parts)
 
 VIDEO_EXTS = {
     ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg",
@@ -1582,12 +1606,74 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             return {}
 
+    def _api_upload_dir(self, name):
+        """Create <repo>/videos/<name> for an 'Upload video dir' run."""
+        name = _validate_upload_dirname(name)
+        dest_root = osp.realpath(UPLOAD_ROOT)
+        dest = osp.realpath(osp.join(UPLOAD_ROOT, name))
+        if osp.commonpath([dest_root, dest]) != dest_root:
+            raise ValueError(f"Invalid upload folder name: {name!r}")
+        with _UPLOAD_LOCK:
+            os.makedirs(dest, exist_ok=True)
+        return dest
+
+    def _api_upload_file(self):
+        """Write one raw-body upload to <repo>/videos/<dir>/<relpath>.
+
+        The file is written to a .part temp file and renamed only after all
+        Content-Length bytes have been received, so an interrupted upload
+        never leaves a corrupt half file behind.
+        """
+        name = _validate_upload_dirname(self.headers.get("X-Upload-Dir"))
+        rel = _validate_upload_relpath(self.headers.get("X-Upload-RelPath"))
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length <= 0:
+            raise ValueError("Empty upload body")
+        dest_root = osp.realpath(UPLOAD_ROOT)
+        dest_dir = osp.realpath(osp.join(UPLOAD_ROOT, name))
+        if osp.commonpath([dest_root, dest_dir]) != dest_root:
+            raise ValueError(f"Invalid upload folder name: {name!r}")
+        target = osp.realpath(osp.join(dest_dir, rel))
+        if osp.commonpath([dest_dir, target]) != dest_dir:
+            raise ValueError(f"Invalid upload file path: {rel!r}")
+        tmp = target + ".part"
+        with _UPLOAD_LOCK:
+            os.makedirs(osp.dirname(target), exist_ok=True)
+            try:
+                with open(tmp, "wb") as fh:
+                    remaining = length
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(8 * 1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        remaining -= len(chunk)
+                if remaining > 0:
+                    raise IOError("Upload interrupted: incomplete body")
+                os.replace(tmp, target)
+            except Exception:
+                if osp.exists(tmp):
+                    os.remove(tmp)
+                raise
+        self._log_upload(f"Uploaded videos/{name}/{rel} ({length} bytes)")
+        return {"ok": True, "path": target, "size": length}
+
+    def _log_upload(self, msg):
+        try:
+            self.session._log(msg)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _handle(self, method):
         try:
             parsed = urlparse(self.path)
             route = parsed.path if len(parsed.path) > 1 else "/"
             qs = parse_qs(parsed.query)
-            body = self._read_body() if method == "POST" else {}
+            # /api/upload_file carries a raw binary body; read it in the route
+            body = None
+            if method == "POST":
+                if route != "/api/upload_file":
+                    body = self._read_body()
 
             if method == "GET":
                 self._route_get(route, qs)
@@ -1684,6 +1770,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(s.save_state())
         if route == "/api/crop":
             return self._send_json(s.set_crop(body.get("tlbr")))
+        if route == "/api/upload_dir":
+            dest = self._api_upload_dir(body.get("name"))
+            return self._send_json({"ok": True, "path": dest})
+        if route == "/api/upload_file":
+            return self._send_json(self._api_upload_file())
         self._send_json({"ok": False, "error": f"No such route: {route}"}, status=404)
 
     # --- verb entrypoints ----------------------------------------------------
@@ -1717,6 +1808,7 @@ def main():
     print(f"Web UI running at http://{args.host}:{args.port}/  (any IP can connect)")
     print(f"  Repo root: {_REPO_ROOT}")
     print(f"  Tracking state saves go to: {STATE_SAVE_DIR}/<video_stem>.pt")
+    print(f"  Uploaded video folders go to: {UPLOAD_ROOT}/<folder_name>/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

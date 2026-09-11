@@ -954,12 +954,161 @@ async function saveBuffer() {
   });
 }
 
+// ------------------------------------------------------------------ upload video dir
+
+// Keep in sync with VIDEO_EXTS in server.py
+const UPLOAD_VIDEO_EXTS = new Set([
+  ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg",
+  ".wmv", ".flv", ".3gp", ".3g2", ".asf", ".ogv", ".ts", ".mxf",
+]);
+
+let uploadCtx = null;  // { cancelled: bool, xhr: XMLHttpRequest|null }
+
+function isUploadVideo(name) {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && UPLOAD_VIDEO_EXTS.has(name.slice(dot).toLowerCase());
+}
+
+function fmtBytes(num) {
+  if (num >= 1e9) return (num / 1e9).toFixed(2) + " GB";
+  if (num >= 1e6) return (num / 1e6).toFixed(1) + " MB";
+  if (num >= 1e3) return (num / 1e3).toFixed(1) + " KB";
+  return num + " B";
+}
+
+function setUploadProgress(frac, statusText) {
+  const f = Math.max(0, Math.min(1, frac));
+  $("upload-progress-fill").style.width = (f * 100).toFixed(1) + "%";
+  if (statusText) $("upload-status").textContent = statusText;
+}
+
+function uploadFile(dirName, relPath, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    uploadCtx.xhr = xhr;
+    xhr.open("POST", "/api/upload_file");
+    xhr.setRequestHeader("X-Upload-Dir", dirName);
+    xhr.setRequestHeader("X-Upload-RelPath", relPath);
+    xhr.responseType = "text";
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
+    xhr.onload = () => {
+      uploadCtx.xhr = null;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch (err) {}
+        resolve(data);
+      } else {
+        let msg = "HTTP " + xhr.status;
+        try { msg = JSON.parse(xhr.responseText).error || msg; } catch (err) {}
+        reject(new Error(msg));
+      }
+    };
+    xhr.onerror = () => { uploadCtx.xhr = null; reject(new Error("Network error during upload")); };
+    xhr.onabort = () => { uploadCtx.xhr = null; reject(new Error("Upload cancelled")); };
+    xhr.send(file);
+  });
+}
+
+async function walkUploadDir(handle, prefix, out) {
+  for await (const entry of handle.values()) {
+    const rel = prefix ? prefix + "/" + entry.name : entry.name;
+    if (entry.kind === "file") {
+      if (isUploadVideo(entry.name)) out.push({ rel, file: await entry.getFile() });
+    } else if (entry.kind === "directory") {
+      await walkUploadDir(entry, rel, out);
+    }
+  }
+}
+
+async function startUpload(dirName, items) {
+  if (!items.length) {
+    toast("No video files found in the selected folder", true);
+    $("btn-upload-dir").disabled = false;
+    return;
+  }
+  const totalBytes = items.reduce((sum, it) => sum + it.file.size, 0);
+  uploadCtx = { cancelled: false, xhr: null };
+  $("btn-upload-dir").disabled = true;
+  $("upload-dialog").style.display = "flex";
+  $("btn-upload-cancel").disabled = false;
+  $("btn-upload-close").disabled = true;
+  $("upload-dest").textContent = `-> videos/${dirName}`;
+  setUploadProgress(0, `Preparing ${items.length} video file(s), ${fmtBytes(totalBytes)} ...`);
+  try {
+    await api("/api/upload_dir", { method: "POST", body: { name: dirName } });
+    let doneBytes = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const before = doneBytes;
+      await uploadFile(dirName, it.rel, it.file, (loaded) =>
+        setUploadProgress((before + loaded) / totalBytes, `File ${i + 1}/${items.length}: ${it.rel}`));
+      doneBytes += it.file.size;
+      setUploadProgress(doneBytes / totalBytes,
+        `File ${i + 1}/${items.length} done (${fmtBytes(doneBytes)}/${fmtBytes(totalBytes)})`);
+    }
+    setUploadProgress(1, `Done: ${items.length} file(s), ${fmtBytes(totalBytes)} -> videos/${dirName}`);
+  } catch (err) {
+    setUploadProgress(0, uploadCtx.cancelled
+      ? "Cancelled (incomplete files were not kept on the server)"
+      : "Failed: " + err.message);
+  }
+  $("btn-upload-cancel").disabled = true;
+  $("btn-upload-close").disabled = false;
+  $("btn-upload-dir").disabled = false;
+}
+
+async function pickUploadDir() {
+  const btn = $("btn-upload-dir");
+  btn.disabled = true;
+  try {
+    if (typeof window.showDirectoryPicker === "function") {
+      let root;
+      try {
+        root = await window.showDirectoryPicker();
+      } catch (err) {
+        if (err && err.name === "AbortError") return; // user closed the picker
+        throw err;
+      }
+      const items = [];
+      await walkUploadDir(root, "", items);
+      await startUpload(root.name, items);
+    } else {
+      // non-Chromium fallback: webkitdirectory file input
+      btn.disabled = false;
+      $("upload-dir-input").click();
+    }
+  } catch (err) {
+    btn.disabled = false;
+    toast(err.message, true);
+  }
+}
+
 // ------------------------------------------------------------------ wiring
 
 function wire() {
   $("btn-open").onclick = openDialog;
   $("btn-save").onclick = saveState;
   $("btn-close").onclick = closeVideo;
+  $("btn-upload-dir").onclick = () => pickUploadDir();
+  $("upload-dir-input").addEventListener("change", (evt) => {
+    const files = Array.from(evt.target.files || []);
+    evt.target.value = "";
+    if (!files.length) return;
+    const dirName = files[0].webkitRelativePath.split("/")[0];
+    const items = files
+      .filter((f) => isUploadVideo(f.name))
+      .map((f) => ({ rel: f.webkitRelativePath.slice(dirName.length + 1), file: f }));
+    startUpload(dirName, items).catch((e) => toast(e.message, true));
+  });
+  $("btn-upload-cancel").onclick = () => {
+    if (!uploadCtx || uploadCtx.cancelled) return;
+    uploadCtx.cancelled = true;
+    if (uploadCtx.xhr) uploadCtx.xhr.abort();
+  };
+  $("btn-upload-close").onclick = () => {
+    $("upload-dialog").style.display = "none";
+    uploadCtx = null;
+  };
 
   // playback
   $("btn-play").onclick = () => {
