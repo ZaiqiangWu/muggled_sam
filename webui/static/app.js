@@ -1024,6 +1024,29 @@ async function walkUploadDir(handle, out) {
   }
 }
 
+// Modal: list files that already exist on the server; resolve with
+// "overwrite" or "skip" (applied to all listed files).
+function askConflict(existing) {
+  return new Promise((resolve) => {
+    const list = $("conflict-list");
+    list.textContent = "";
+    for (const rel of existing) {
+      const div = document.createElement("div");
+      div.textContent = rel;
+      list.appendChild(div);
+    }
+    $("conflict-dialog").style.display = "flex";
+    const done = (action) => {
+      $("conflict-dialog").style.display = "none";
+      $("btn-conflict-overwrite").onclick = null;
+      $("btn-conflict-skip").onclick = null;
+      resolve(action);
+    };
+    $("btn-conflict-overwrite").onclick = () => done("overwrite");
+    $("btn-conflict-skip").onclick = () => done("skip");
+  });
+}
+
 async function startUpload(dirName, items) {
   if (!items.length) {
     $("upload-dialog").style.display = "none";
@@ -1032,27 +1055,53 @@ async function startUpload(dirName, items) {
     $("btn-upload-dir").disabled = false;
     return;
   }
-  const totalBytes = items.reduce((sum, it) => sum + it.file.size, 0);
   uploadCtx = { cancelled: false, xhr: null };
   $("btn-upload-dir").disabled = true;
   $("upload-dialog").style.display = "flex";
   $("btn-upload-cancel").disabled = false;
   $("btn-upload-close").disabled = true;
   $("upload-dest").textContent = `-> videos/${dirName}`;
-  setUploadProgress(0, `Preparing ${items.length} video file(s), ${fmtBytes(totalBytes)} ...`);
+  let skippedCount = 0;
   try {
+    // Ask the server which of these files already exist and let the user
+    // choose overwrite vs. skip before anything is written.
+    setUploadProgress(0, `Checking ${items.length} file(s) for existing files ...`);
+    let toUpload = items;
+    const check = await api("/api/upload_check",
+      { method: "POST", body: { name: dirName, files: items.map((it) => it.rel) } });
+    if (check.existing && check.existing.length) {
+      const action = await askConflict(check.existing);
+      if (action === "skip") {
+        const skipSet = new Set(check.existing);
+        skippedCount = check.existing.length;
+        toUpload = items.filter((it) => !skipSet.has(it.rel));
+      }
+    }
+    if (uploadCtx.cancelled) {  // Cancel clicked while checking
+      setUploadProgress(0, "Cancelled (nothing was uploaded)");
+      return;
+    }
+    if (!toUpload.length) {
+      setUploadProgress(1, `Skipped ${skippedCount} existing file(s) - nothing uploaded`);
+      return;
+    }
+    const totalBytes = toUpload.reduce((sum, it) => sum + it.file.size, 0);
+    setUploadProgress(0, `Preparing ${toUpload.length} video file(s), ${fmtBytes(totalBytes)} ...`);
     await api("/api/upload_dir", { method: "POST", body: { name: dirName } });
     let doneBytes = 0;
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
+    for (let i = 0; i < toUpload.length; i++) {
+      const it = toUpload[i];
       const before = doneBytes;
       await uploadFile(dirName, it.rel, it.file, (loaded) =>
-        setUploadProgress((before + loaded) / totalBytes, `File ${i + 1}/${items.length}: ${it.rel}`));
+        setUploadProgress((before + loaded) / totalBytes, `File ${i + 1}/${toUpload.length}: ${it.rel}`));
       doneBytes += it.file.size;
       setUploadProgress(doneBytes / totalBytes,
-        `File ${i + 1}/${items.length} done (${fmtBytes(doneBytes)}/${fmtBytes(totalBytes)})`);
+        `File ${i + 1}/${toUpload.length} done (${fmtBytes(doneBytes)}/${fmtBytes(totalBytes)})`);
     }
-    setUploadProgress(1, `Done: ${items.length} file(s), ${fmtBytes(totalBytes)} -> videos/${dirName}`);
+    setUploadProgress(1,
+      `Done: ${toUpload.length} uploaded, ${fmtBytes(doneBytes)}` +
+      (skippedCount ? `, ${skippedCount} skipped (existing)` : "") +
+      ` -> videos/${dirName}`);
   } catch (err) {
     setUploadProgress(0, uploadCtx.cancelled
       ? "Cancelled (incomplete files were not kept on the server)"

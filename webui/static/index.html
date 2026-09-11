@@ -228,6 +228,21 @@
     </div>
   </div>
 
+  <!-- Upload conflict dialog: files already exist on the server -->
+  <div id="conflict-dialog" class="modal" style="display:none">
+    <div class="modal-card">
+      <h2>Files already exist on the server</h2>
+      <div class="hint">The following file(s) already exist in the upload destination:</div>
+      <div id="conflict-list" style="max-height:300px;overflow-y:auto;font-size:12px;line-height:1.7"></div>
+      <div class="hint">Overwrite them with the uploaded copies, or skip them?</div>
+      <div class="row modal-actions">
+        <span class="spacer"></span>
+        <button id="btn-conflict-skip">Skip existing</button>
+        <button id="btn-conflict-overwrite" class="primary">Overwrite</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Loading overlay (model load / heavy ops) -->
   <div id="loading" style="display:none">
     <div class="loading-card"><div class="spinner"></div><div id="loading-text">Loading...</div></div>

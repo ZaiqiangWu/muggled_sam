@@ -1611,6 +1611,26 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             return {}
 
+    def _api_upload_check(self, body):
+        """Report which files under <repo>/videos/<name> already exist."""
+        name = _validate_upload_dirname(body.get("name"))
+        files = body.get("files") or []
+        if not isinstance(files, list):
+            raise ValueError("files must be a list")
+        dest_root = osp.realpath(UPLOAD_ROOT)
+        dest_dir = osp.realpath(osp.join(UPLOAD_ROOT, name))
+        if osp.commonpath([dest_root, dest_dir]) != dest_root:
+            raise ValueError(f"Invalid upload folder name: {name!r}")
+        existing = []
+        for rel in files[:2000]:
+            rel = _validate_upload_relpath(rel)
+            target = osp.realpath(osp.join(dest_dir, rel))
+            if osp.commonpath([dest_dir, target]) != dest_dir:
+                raise ValueError(f"Invalid upload file path: {rel!r}")
+            if osp.isfile(target):
+                existing.append(rel)
+        return {"existing": existing}
+
     def _api_upload_dir(self, name):
         """Create <repo>/videos/<name> for an 'Upload video dir' run."""
         name = _validate_upload_dirname(name)
@@ -1775,6 +1795,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(s.save_state())
         if route == "/api/crop":
             return self._send_json(s.set_crop(body.get("tlbr")))
+        if route == "/api/upload_check":
+            return self._send_json(self._api_upload_check(body))
         if route == "/api/upload_dir":
             dest = self._api_upload_dir(body.get("name"))
             return self._send_json({"ok": True, "path": dest})
