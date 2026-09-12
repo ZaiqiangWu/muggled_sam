@@ -508,7 +508,8 @@ input[type="range"] { width: 100%; }
 .seg-job.done .seg-prog-fill { background: var(--accent2); }
 .seg-job.error .seg-prog-fill { background: var(--danger); }
 
-.seg-cancel { padding: 1px 8px; font-size: 11px; }
+.seg-cancel,
+.seg-job-remove { padding: 1px 8px; font-size: 11px; }
 
 /* 追加要求2: finished-job actions (bottom-right of the job card) */
 .seg-job-actions {

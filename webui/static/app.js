@@ -1281,7 +1281,7 @@ function segJobHtml(job) {
     actionsHtml = `<div class="seg-job-actions">
       ${segPreviewButtonHtml(job)}
       <button class="seg-accept" data-id="${escHtml(job.job_id)}"
-        ${job.has_tars ? "" : "disabled"} title="${acceptTitle}">Accept</button>
+        ${job.has_tars && !job.accepted ? "" : "disabled"} title="${acceptTitle}">Accept</button>
       <button class="seg-delete danger" data-id="${escHtml(job.job_id)}"
         title="Delete this job's result files (tars/mp4), generated mask frames and the preview video. Frames already accepted under ./videos/ are kept.">Delete</button>
     </div>`;
@@ -1289,6 +1289,10 @@ function segJobHtml(job) {
   const canCancel = job.status === "queued" || job.status === "running";
   const cancelBtn = canCancel
     ? `<button class="seg-cancel danger" data-id="${escHtml(job.job_id)}">Cancel</button>` : "";
+  // Cancelled task bars: a Delete button that clears the bar from the list
+  const removeBtn = job.status === "cancelled"
+    ? `<button class="seg-job-remove danger" data-id="${escHtml(job.job_id)}"
+        title="Remove this cancelled task from the list">Delete</button>` : "";
   const statusLabel = segStatusLabel(job);
   return `<div class="seg-job ${cls}">
     <div class="seg-job-head">
@@ -1296,6 +1300,7 @@ function segJobHtml(job) {
       <span class="seg-job-label" title="${escHtml(job.video_path)}">${escHtml(job.label)}</span>
       <span class="seg-job-frames">${frames}</span>
       ${cancelBtn}
+      ${removeBtn}
     </div>
     <div class="seg-prog"><div class="seg-prog-fill" style="width:${pct}%"></div></div>
     ${job.message ? `<div class="seg-job-msg">${escHtml(job.message)}</div>` : ""}
@@ -1360,6 +1365,9 @@ function renderSegQueue(data) {
 
   list.querySelectorAll(".seg-cancel").forEach((btn) => {
     btn.onclick = () => cancelSegJob(btn.dataset.id);
+  });
+  list.querySelectorAll(".seg-job-remove").forEach((btn) => {
+    btn.onclick = () => removeCancelledSegJob(btn.dataset.id);
   });
   // 追加要求2: Preview (generate ring -> play), Accept, Delete
   list.querySelectorAll(".seg-preview").forEach((btn) => {
@@ -1440,9 +1448,36 @@ async function cancelSegJob(jobId) {
   }
 }
 
-async function clearSegDone() {
+async function removeCancelledSegJob(jobId) {
+  const ok = confirm(
+    "Remove this cancelled task from the list?\n\n" +
+    "This only clears the task bar (cancelled jobs save no results)."
+  );
+  if (!ok) return;
   try {
-    await api("/api/seg/clear", { method: "POST", body: {} });
+    await api("/api/seg/delete_job", { method: "POST", body: { job_id: jobId } });
+    await pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+async function clearSegAll() {
+  const ok = confirm(
+    "Clear ALL generated segmentation artifacts?\n\n" +
+    "Equivalent to clear_all.sh:\n" +
+    "  - ./saved_images/run_video/   (task results)\n" +
+    "  - ./generated_mask_videos/    (preview frames + preview videos)\n" +
+    "  - ./videos/<group>/<name>/    (accepted mask frames)\n\n" +
+    "Source .mp4 videos are kept. Finished task bars are removed; " +
+    "queued/running tasks are not touched."
+  );
+  if (!ok) return;
+  try {
+    const res = await api("/api/seg/clear", { method: "POST", body: {} });
+    const nJobs = (res && res.removed_jobs) || 0;
+    const nPaths = (res && res.removed_paths || []).length;
+    toast(`Cleared ${nJobs} finished task(s) and ${nPaths} artifact path(s)`);
     await pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
@@ -1496,8 +1531,8 @@ async function acceptSegJob(jobId) {
   );
   if (!ok) return;
   try {
-    await api("/api/seg/accept", { method: "POST", body: { job_id: jobId } });
-    toast("Mask frames accepted");
+    const res = await api("/api/seg/accept", { method: "POST", body: { job_id: jobId } });
+    toast((res && res.job && res.job.message) || "Mask frames accepted");
     await pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
@@ -1610,7 +1645,7 @@ function wireSeg() {
   $("seg-prompt-browse").onclick = () => openSegBrowse("pt", "seg-prompt", $("seg-prompt").value);
   $("seg-video-browse").onclick = () => openSegBrowse("video", "seg-video", $("seg-video").value);
   $("seg-dir-browse").onclick = () => openSegBrowse("dir", "seg-dir", $("seg-dir").value);
-  $("seg-clear-done").onclick = () => clearSegDone();
+  $("seg-clear-all").onclick = () => clearSegAll();
 
   // browse dialog
   $("seg-browse-refresh").onclick = () => {

@@ -122,6 +122,8 @@ _UPLOAD_LOCK = threading.Lock()
 #   accepted frames       : <repo>/videos/<garment>/<video_stem>/*.png
 MASK_PNG_ROOT = osp.join(_REPO_ROOT, "generated_mask_videos")
 VIDEOS_DEST_ROOT = osp.join(_REPO_ROOT, "videos")
+# Raw segmentation results (tars / ffmpeg mp4s) written by the queue
+SAVED_FRAMES_DIR = osp.join(_REPO_ROOT, "saved_images", "run_video")
 # Finished segmentation jobs are persisted here so the task list survives
 # server restarts (removed only when the user clears finished jobs).
 JOB_HISTORY_FILE = osp.join(osp.dirname(osp.abspath(__file__)), "seg_job_history.json")
@@ -2040,16 +2042,92 @@ class SegmentationQueue:
             self._cond.notify_all()
         return job.to_dict()
 
-    def clear_finished(self):
+    def clear_all(self):
+        """'Clear all' (formerly 'Clear finished'): remove every finished
+        job bar (and from the persisted history) AND wipe all generated
+        segmentation artifacts - the Python equivalent of clear_all.sh.
+        Source .mp4 videos under ./videos/ are never removed. Queued and
+        running jobs are left in the queue (a running job may fail if its
+        results are deleted while it is saving)."""
         with self._lock:
             before = len(self._jobs)
             self._jobs = [j for j in self._jobs if j.status in ("queued", "running")]
             self._by_id = {j.job_id: j for j in self._jobs}
             self._pending = deque(j.job_id for j in self._jobs if j.status == "queued")
-            removed = before - len(self._jobs)
+            removed_jobs = before - len(self._jobs)
             # 追加要求1: user actively cleared -> drop from disk too
             self._persist_finished()
-        return {"removed": removed}
+        # Disk cleanup outside the lock: rmtree on large frame trees can be
+        # slow and must not block queue progress updates.
+        removed_paths = self._clear_disk_artifacts()
+        return {"removed_jobs": removed_jobs, "removed_paths": removed_paths}
+
+    def _clear_disk_artifacts(self):
+        """Python equivalent of clear_all.sh. Returns the removed paths.
+
+        - for each ./videos/<group>/<name>.mp4, remove ./videos/<group>/<name>/
+          (the source .mp4 file itself is kept)
+        - clear the contents of ./saved_images/run_video/
+        - clear the contents of ./generated_mask_videos/
+        """
+        removed = []
+        if osp.isdir(VIDEOS_DEST_ROOT):
+            with os.scandir(VIDEOS_DEST_ROOT) as group_it:
+                for group in group_it:
+                    if not group.is_dir():
+                        continue
+                    with os.scandir(group.path) as entry_it:
+                        for entry in entry_it:
+                            if entry.is_file() and entry.name.endswith(".mp4"):
+                                frame_dir = entry.path[: -len(".mp4")]
+                                if osp.isdir(frame_dir):
+                                    shutil.rmtree(frame_dir, ignore_errors=True)
+                                    removed.append(frame_dir)
+        removed.extend(self._clear_dir_contents(SAVED_FRAMES_DIR))
+        removed.extend(self._clear_dir_contents(MASK_PNG_ROOT))
+        return removed
+
+    @staticmethod
+    def _clear_dir_contents(dir_path):
+        """Remove every top-level entry of dir_path (contents only, like
+        clear_all.sh). Missing directories are skipped."""
+        removed = []
+        if not osp.isdir(dir_path):
+            return removed
+        with os.scandir(dir_path) as entry_it:
+            for entry in entry_it:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        shutil.rmtree(entry.path, ignore_errors=True)
+                    else:
+                        os.remove(entry.path)
+                    removed.append(entry.path)
+                except OSError:
+                    pass
+        return removed
+
+    def delete_job(self, job_id):
+        """Remove a cancelled job's bar from the list (and from the persisted
+        history, so it does not come back after a restart). Cancelled jobs
+        have no saved results, so there is nothing else to delete."""
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.status != "cancelled":
+                raise ValueError(
+                    f"Only cancelled jobs can be deleted this way (job is {job.status})"
+                )
+            self._jobs = [j for j in self._jobs if j.job_id != job_id]
+            self._by_id.pop(job_id, None)
+            try:
+                self._pending.remove(job_id)
+            except ValueError:
+                pass
+            # 追加要求1: user actively removed it -> drop from disk too
+            self._persist_finished()
+            self._cond.notify_all()
+        return job.to_dict()
 
     # ------------------------------------------------------------- mask preview / accept / delete
     # 追加要求2: mirrors check_generated_masks.py, but keeps the generated
@@ -2230,7 +2308,10 @@ class SegmentationQueue:
             writer.close()
 
     def accept_job(self, job_id):
-        """Move the generated rgba frames to ./videos/<garment>/<mask_name>/."""
+        """Move the generated rgba frames to ./videos/<garment>/<mask_name>/.
+        Re-accepting is a no-op: if the frames are already in the destination
+        (accepted earlier, or moved there by another job with the same video
+        name / by check_generated_masks.py) report that instead of raising."""
         with self._lock:
             job = self._by_id.get(job_id)
             if job is None:
@@ -2238,12 +2319,22 @@ class SegmentationQueue:
             if job.status != "done":
                 raise ValueError(f"Only finished jobs can be accepted (job is {job.status})")
             png_dir = job.preview_png_dir()
+            dest = job.accept_dest_dir()
             has_pngs = osp.isdir(png_dir) and any(
                 n.lower().endswith(".png") for n in os.listdir(png_dir)
             )
             if not has_pngs:
-                raise ValueError("No generated mask frames to accept - press Preview first")
-            dest = job.accept_dest_dir()
+                dest_has_pngs = osp.isdir(dest) and any(
+                    n.lower().endswith(".png") for n in os.listdir(dest)
+                )
+                if dest_has_pngs:
+                    job.accepted = True
+                    job.message = f"Already accepted: mask frames are in {dest}"
+                    return job.to_dict()
+                raise ValueError(
+                    "No generated mask frames to accept - press Preview first "
+                    "(the preview frames were already moved to ./videos/ or deleted)"
+                )
             if osp.exists(dest):
                 raise ValueError(f"Destination already exists: {dest}")
             os.makedirs(osp.dirname(dest), exist_ok=True)
@@ -2964,7 +3055,10 @@ class Handler(BaseHTTPRequestHandler):
             job = SEG_QUEUE.cancel(body.get("job_id"))
             return self._send_json({"ok": True, "job": job})
         if route == "/api/seg/clear":
-            return self._send_json({"ok": True, **SEG_QUEUE.clear_finished()})
+            return self._send_json({"ok": True, **SEG_QUEUE.clear_all()})
+        if route == "/api/seg/delete_job":
+            job = SEG_QUEUE.delete_job(body.get("job_id"))
+            return self._send_json({"ok": True, "job": job})
         if route == "/api/seg/preview":
             job = SEG_QUEUE.start_preview(body.get("job_id"))
             return self._send_json({"ok": True, "job": job})

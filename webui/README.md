@@ -170,13 +170,16 @@ The queue lists every job with:
 Folder batches are grouped under a header showing the folder name and clip
 count, so each clip's progress is individually visible. **Cancel** works on
 queued jobs (dropped) and running jobs (finishes the current frame, then stops
-without saving). **Clear finished** removes completed/failed/cancelled jobs
-from the list.
+without saving). **Clear all** removes completed/failed/cancelled jobs from
+the list **and** wipes all generated segmentation artifacts - the Python
+equivalent of the repo-root `clear_all.sh`: `./saved_images/run_video/`,
+`./generated_mask_videos/`, and every `./videos/<group>/<name>/` frame folder
+that has a sibling `./videos/<group>/<name>.mp4` (source videos are kept).
 
 Finished jobs **persist across server restarts** — they are written to
 `webui/seg_job_history.json` and restored on startup (jobs that were still
 queued/running when the server stopped are shown as cancelled with a note).
-They are removed only by **Clear finished**.
+They are removed only by **Clear all**.
 
 ### Preview / Accept / Delete (finished jobs)
 
@@ -211,7 +214,9 @@ output layout as the script.
 - `GET  /api/seg/queue` — queue + counts + progress
 - `POST /api/seg/submit` — `{kind, prompt_path, video_path|input_dir, config}`
 - `POST /api/seg/cancel` — `{job_id}`
-- `POST /api/seg/clear` — remove finished jobs
+- `POST /api/seg/clear` — **Clear all**: remove finished jobs + wipe all
+  generated artifacts (clear_all.sh equivalent)
+- `POST /api/seg/delete_job` — `{job_id}` remove a cancelled job's bar (also from the persisted history)
 - `GET  /api/seg/browse?path=&kind=pt|video|dir` — server path browser
 - `POST /api/seg/preview` — `{job_id}` start mask preview generation
 - `GET  /api/seg/preview_video?job_id=` — stream the preview mp4 (Range-aware)
@@ -225,7 +230,7 @@ output layout as the script.
 - `static/index.html`, `static/style.css`, `static/app.js` — the web page
 - `task.md` — task description
 - `seg_job_history.json` — created at runtime; persisted finished
-  segmentation jobs (survives restarts, cleared by **Clear finished**)
+  segmentation jobs (survives restarts, cleared by **Clear all**)
 
 ## Notes
 
