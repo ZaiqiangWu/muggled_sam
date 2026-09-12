@@ -24,3 +24,17 @@ Task 1的Prompt Authoring网页界面开发已经完成，现在需要开发Vide
 - 相关代码文件都放在`webui`中，不要动别的地方
 - 不要在该Mac上做任何测试，只管开发
 
+追加要求1：
+- 对于每个视频分割任务，执行中的时候显示预估剩余所需时间
+- 对于已经完成的分割任务，任务列表要保留，即使服务重启也不能丢失，除非用户主动清理
+
+追加要求2:
+该要求与check_generated_masks.py 脚本相关，该脚本主要完成以下任务：
+- 从tar文件生成mask帧的rgba的png文件，若有多个object则合并，若只有单个object则只解压
+- 生成 mask 预览视频，把mask帧的rgba的png文件合成为"白底 + 分割区域内原图内容"的mp4文件
+我的要求是：
+- 对已经完成的分割任务的任务条，在右下侧添加4个按钮：Preview, Accept, Delete
+  - Preview 按钮按下后，执行生成 mask 预览视频（这里先不要把png文件移动到./videos/<garment>/<mask_name>/，先放在./generated_mask_videos/<mask_name>/），按钮中出现环形进度条；完成后进度条变为视频播放按钮，再次按下Preview后弹出窗口播放生成 mask 预览视频，进度条可以拖动，视频窗口右上角有个叉可以供用户关闭窗口，视频播放完毕后停止，不要自动关闭窗口
+  - Accept 按钮按下后，把png文件移动到./videos/<garment>/<mask_name>/
+  - Delete按钮按下后，删除相关tar文件，png文件和mask 预览视频mp4文件(若已经被accept移动到./videos/<garment>/<mask_name>/下的png文件不会被删除)
+
