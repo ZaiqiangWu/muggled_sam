@@ -365,6 +365,20 @@
     <div class="loading-card"><div class="spinner"></div><div id="loading-text">Loading...</div></div>
   </div>
 
+  <!-- Mask preview video dialog (segmentation tab): native controls give a
+       seekable progress bar; the X closes the window, playback ending just
+       stops the video (the window stays open) -->
+  <div id="seg-preview-dialog" class="modal" style="display:none">
+    <div class="modal-card video-modal-card">
+      <div class="video-modal-head">
+        <h2 id="seg-preview-title">Mask preview</h2>
+        <button id="seg-preview-close" class="video-modal-close" title="Close"
+          aria-label="Close">&times;</button>
+      </div>
+      <video id="seg-preview-video" controls preload="metadata"></video>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div id="toast" style="display:none"></div>
 

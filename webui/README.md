@@ -163,6 +163,8 @@ The queue lists every job with:
 - a status pill (`queued` / `loading` / `running` / `saving` / `done` /
   `error` / `cancelled`),
 - a live progress bar + `frame N/total`,
+- an estimated remaining time while running (`~Xm Ys left`), computed from
+  the frame-processing rate (model/prompt loading time is excluded),
 - the saved result path(s) once done, or the error message on failure.
 
 Folder batches are grouped under a header showing the folder name and clip
@@ -170,6 +172,35 @@ count, so each clip's progress is individually visible. **Cancel** works on
 queued jobs (dropped) and running jobs (finishes the current frame, then stops
 without saving). **Clear finished** removes completed/failed/cancelled jobs
 from the list.
+
+Finished jobs **persist across server restarts** — they are written to
+`webui/seg_job_history.json` and restored on startup (jobs that were still
+queued/running when the server stopped are shown as cancelled with a note).
+They are removed only by **Clear finished**.
+
+### Preview / Accept / Delete (finished jobs)
+
+Each finished job card has three buttons on the bottom right:
+
+- **Preview** — generates the mask preview video (the `check_generated_masks.py`
+  flow: extract the job's tar files, merge multiple object masks into rgba
+  png frames, encode a white-background mp4). The frames are kept in
+  `./generated_mask_videos/<video_stem>/` (NOT moved to `./videos/...` yet)
+  and the video in `./generated_mask_videos/<video_stem>_mask.mp4`. While
+  generating, the button shows a circular progress ring; when done it becomes
+  a play button, and pressing it again opens a video dialog (seekable
+  progress bar, X in the top-right corner; the video just stops when finished,
+  the window stays open). Requires `imageio` + `imageio-ffmpeg` (same as
+  `util/multithread_video_writer.py`).
+- **Accept** — moves the generated frames to `./videos/<garment>/<video_stem>/`
+  (`<garment>` is the video stem without its last `_`-separated part, exactly
+  like `check_generated_masks.py`).
+- **Delete** — deletes the job's saved result files (tars or mp4), the
+  generated frames and the preview mp4. Frames already accepted under
+  `./videos/<garment>/<video_stem>/` are kept.
+
+Preview/Accept need tar results; jobs saved as mp4 (ffmpeg configured) show
+those two buttons disabled.
 
 Results are written to `<repo_root>/saved_images/run_video/<video_stem>/`
 (ffmpeg mp4 if an ffmpeg path is set, otherwise a PNG tarfile) — the same
@@ -182,6 +213,10 @@ output layout as the script.
 - `POST /api/seg/cancel` — `{job_id}`
 - `POST /api/seg/clear` — remove finished jobs
 - `GET  /api/seg/browse?path=&kind=pt|video|dir` — server path browser
+- `POST /api/seg/preview` — `{job_id}` start mask preview generation
+- `GET  /api/seg/preview_video?job_id=` — stream the preview mp4 (Range-aware)
+- `POST /api/seg/accept` — `{job_id}` move frames to `./videos/<garment>/<name>/`
+- `POST /api/seg/delete` — `{job_id}` delete the job's result artifacts
 
 ## Files
 
@@ -189,11 +224,16 @@ output layout as the script.
   segmentation queue (both mirror the reference scripts)
 - `static/index.html`, `static/style.css`, `static/app.js` — the web page
 - `task.md` — task description
+- `seg_job_history.json` — created at runtime; persisted finished
+  segmentation jobs (survives restarts, cleared by **Clear finished**)
 
 ## Notes
 
 - Single-user tool: one shared session, all requests serialized.
 - Like the script, the web server keeps `ReversibleLoopingVideoReader` as the
   single source of truth for playback (forward/reverse/looping).
+- Mask previews are encoded with `imageio` + `imageio-ffmpeg` (the same
+  dependency `util/multithread_video_writer.py` / `check_generated_masks.py`
+  use); only the Preview action needs it.
 - Per the task, this was developed only — it has not been run/tested on this
   machine.

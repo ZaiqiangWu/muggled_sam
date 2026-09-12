@@ -41,10 +41,13 @@ import json
 import os
 import os.path as osp
 import sys
+import shutil
+import tarfile
 import threading
 import time
 import traceback
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -112,6 +115,16 @@ STATE_SAVE_DIR = osp.join(_REPO_ROOT, "tracking_states")
 # 'Upload video dir' destination: <repo_root>/videos/<picked folder name>/...
 UPLOAD_ROOT = osp.join(_REPO_ROOT, "videos")
 _UPLOAD_LOCK = threading.Lock()
+# Mask preview / accept layout (mirrors check_generated_masks.py, but the
+# generated frames stay in generated_mask_videos/ until Accept is pressed):
+#   generated mask frames : <repo>/generated_mask_videos/<video_stem>/*.png
+#   preview mp4           : <repo>/generated_mask_videos/<video_stem>_mask.mp4
+#   accepted frames       : <repo>/videos/<garment>/<video_stem>/*.png
+MASK_PNG_ROOT = osp.join(_REPO_ROOT, "generated_mask_videos")
+VIDEOS_DEST_ROOT = osp.join(_REPO_ROOT, "videos")
+# Finished segmentation jobs are persisted here so the task list survives
+# server restarts (removed only when the user clears finished jobs).
+JOB_HISTORY_FILE = osp.join(osp.dirname(osp.abspath(__file__)), "seg_job_history.json")
 
 
 def _validate_upload_dirname(name):
@@ -1644,6 +1657,14 @@ class SegJob:
         self.started_at = None
         self.finished_at = None
         self._cancel_requested = False
+        # 追加要求1: wall clock of the first processed frame (ETA rate base;
+        # excludes model/prompt loading time)
+        self.frames_started_at = None
+        # 追加要求2: mask preview / accept / delete state (finished jobs only)
+        self.preview_status = "none"     # none | generating | ready | error
+        self.preview_progress = 0.0      # 0..1 while generating
+        self.preview_error = None
+        self.accepted = False
 
     def request_cancel(self):
         self._cancel_requested = True
@@ -1651,12 +1672,63 @@ class SegJob:
     def cancel_requested(self):
         return self._cancel_requested
 
+    # ------------------------------------------------------------- result paths
+    def mask_name(self):
+        """Results folder name for this job (video file name without extension)."""
+        return osp.splitext(osp.basename(self.video_path))[0]
+
+    def preview_png_dir(self):
+        """Where Preview generates the rgba mask frames (before Accept)."""
+        return osp.join(MASK_PNG_ROOT, self.mask_name())
+
+    def preview_mp4_path(self):
+        """White-background mask preview video written by Preview."""
+        return osp.join(MASK_PNG_ROOT, self.mask_name() + "_mask.mp4")
+
+    def accept_dest_dir(self):
+        """Where Accept moves the frames: ./videos/<garment>/<mask_name>/."""
+        garment_name = "_".join(self.mask_name().split("_")[:-1])
+        return osp.join(VIDEOS_DEST_ROOT, garment_name, self.mask_name())
+
+    def tar_result_paths(self):
+        """This job's saved tarfile results (the inputs for Preview/Delete)."""
+        return [p for p in self.saved_paths if str(p).endswith(".tar")]
+
     def to_dict(self):
         elapsed = None
         if self.started_at is not None:
             end = self.finished_at if self.finished_at is not None else time.time()
             elapsed = round(end - self.started_at, 1)
         progress = (self.current_frame / self.total_frames) if self.total_frames > 0 else 0.0
+        # 追加要求1: estimated remaining time while frames are being processed
+        eta_seconds = None
+        if (
+            self.status == "running"
+            and self.total_frames > 0
+            and 0 < self.current_frame < self.total_frames
+            and self.frames_started_at is not None
+        ):
+            frame_elapsed = time.time() - self.frames_started_at
+            if frame_elapsed >= 1.0:
+                rate = self.current_frame / frame_elapsed
+                if rate > 0:
+                    eta_seconds = round(
+                        (self.total_frames - self.current_frame) / rate, 1
+                    )
+        # 追加要求2: preview / accept state (derived from disk for finished jobs)
+        has_tars = False
+        accepted = False
+        preview_status = self.preview_status
+        preview_url = None
+        if self.status == "done":
+            has_tars = any(osp.isfile(p) for p in self.tar_result_paths())
+            accepted = osp.isdir(self.accept_dest_dir())
+            if preview_status != "generating":
+                if osp.isfile(self.preview_mp4_path()):
+                    preview_status = "ready"
+                    preview_url = f"/api/seg/preview_video?job_id={self.job_id}"
+                elif preview_status != "error":
+                    preview_status = "none"
         return {
             "job_id": self.job_id,
             "kind": self.kind,
@@ -1677,6 +1749,35 @@ class SegJob:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "elapsed": elapsed,
+            "eta_seconds": eta_seconds,
+            "has_tars": has_tars,
+            "accepted": accepted,
+            "preview_status": preview_status,
+            "preview_progress": round(self.preview_progress, 3),
+            "preview_error": self.preview_error,
+            "preview_url": preview_url,
+        }
+
+    def to_storage(self):
+        """Serializable fields used to persist finished jobs across restarts."""
+        return {
+            "job_id": self.job_id,
+            "kind": self.kind,
+            "batch_id": self.batch_id,
+            "batch_label": self.batch_label,
+            "prompt_path": self.prompt_path,
+            "video_path": self.video_path,
+            "config": dict(self.config),
+            "status": self.status,
+            "phase": self.phase,
+            "current_frame": self.current_frame,
+            "total_frames": self.total_frames,
+            "message": self.message,
+            "error": self.error,
+            "saved_paths": list(self.saved_paths),
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
         }
 
 
@@ -1691,6 +1792,10 @@ class SegmentationQueue:
         self._pending = deque()   # queued job_ids in FIFO order
         self._worker = None
         self._counter = 0
+        # 追加要求1: finished-job persistence (survives restarts)
+        self._history_loaded = False
+        # 追加要求2: at most one mask preview generates at a time
+        self._preview_active_job = None
         # cached model
         self._model = None
         self._model_key = None
@@ -1699,11 +1804,94 @@ class SegmentationQueue:
     # ------------------------------------------------------------- lifecycle
     def start(self):
         with self._lock:
+            self._load_history()
             if self._worker is None:
                 self._worker = threading.Thread(
                     target=self._worker_loop, name="seg-queue-worker", daemon=True
                 )
                 self._worker.start()
+
+    # ------------------------------------------------------------- persistence
+    def _load_history(self):
+        """Restore finished jobs from disk. They are shown in the queue but
+        never re-run (追加要求1: the finished list survives restarts)."""
+        if self._history_loaded:
+            return
+        self._history_loaded = True
+        if not osp.isfile(JOB_HISTORY_FILE):
+            return
+        try:
+            with open(JOB_HISTORY_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            entries = data.get("jobs", []) if isinstance(data, dict) else data
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            return
+        restored = []
+        for d in entries:
+            if not isinstance(d, dict) or not d.get("job_id"):
+                continue
+            try:
+                job = SegJob(
+                    job_id=str(d["job_id"]),
+                    kind=str(d.get("kind", "video")),
+                    prompt_path=str(d.get("prompt_path", "")),
+                    video_path=str(d.get("video_path", "")),
+                    config=_normalize_seg_config(dict(d.get("config") or {})),
+                    batch_id=d.get("batch_id"),
+                    batch_label=d.get("batch_label"),
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            job.status = str(d.get("status", "cancelled"))
+            job.phase = str(d.get("phase", "idle"))
+            job.current_frame = int(d.get("current_frame", 0) or 0)
+            job.total_frames = int(d.get("total_frames", 0) or 0)
+            job.message = str(d.get("message", "") or "")
+            job.error = d.get("error")
+            job.saved_paths = list(d.get("saved_paths") or [])
+            job.created_at = float(d.get("created_at") or time.time())
+            job.started_at = d.get("started_at")
+            job.finished_at = d.get("finished_at")
+            if job.status in ("queued", "running"):
+                # the server went away while the job was still active
+                job.status = "cancelled"
+                job.phase = "idle"
+                job.message = "Server restarted before this job finished"
+                job.finished_at = time.time()
+            if job.status not in ("done", "error", "cancelled"):
+                continue
+            restored.append(job)
+        if not restored:
+            return
+        restored.sort(key=lambda j: (j.created_at, j.job_id))
+        with self._lock:
+            self._jobs = restored + self._jobs
+            for j in restored:
+                self._by_id.setdefault(j.job_id, j)
+            # never reuse an id that a persisted job already owns
+            for j in self._jobs:
+                for jid in (j.job_id, j.batch_id or ""):
+                    digits = "".join(ch for ch in str(jid) if ch.isdigit())
+                    if digits:
+                        self._counter = max(self._counter, int(digits))
+            print(f"Restored {len(restored)} finished segmentation job(s) "
+                  f"from {JOB_HISTORY_FILE}")
+
+    def _persist_finished(self):
+        """Write all finished jobs to disk. Must be called holding self._lock."""
+        entries = [
+            j.to_storage()
+            for j in self._jobs
+            if j.status in ("done", "error", "cancelled")
+        ]
+        try:
+            tmp = JOB_HISTORY_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "jobs": entries}, fh, indent=1)
+            os.replace(tmp, JOB_HISTORY_FILE)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
 
     # ------------------------------------------------------------- helpers
     def _next_id(self, prefix):
@@ -1818,6 +2006,7 @@ class SegmentationQueue:
                     self._by_id.pop(jid, None)
                     while self._pending and self._pending[0] == jid:
                         self._pending.popleft()
+                self._persist_finished()
 
     # ------------------------------------------------------------- queries
     def status(self):
@@ -1842,6 +2031,7 @@ class SegmentationQueue:
                     self._pending.remove(job_id)
                 except ValueError:
                     pass
+                self._persist_finished()
             elif job.status == "running":
                 job.request_cancel()
                 job.message = "Cancellation requested (finishing current frame)"
@@ -1857,7 +2047,243 @@ class SegmentationQueue:
             self._by_id = {j.job_id: j for j in self._jobs}
             self._pending = deque(j.job_id for j in self._jobs if j.status == "queued")
             removed = before - len(self._jobs)
+            # 追加要求1: user actively cleared -> drop from disk too
+            self._persist_finished()
         return {"removed": removed}
+
+    # ------------------------------------------------------------- mask preview / accept / delete
+    # 追加要求2: mirrors check_generated_masks.py, but keeps the generated
+    # rgba frames in ./generated_mask_videos/<mask_name>/ until Accept moves
+    # them to ./videos/<garment>/<mask_name>/.
+
+    def get_job(self, job_id):
+        with self._lock:
+            return self._by_id.get(job_id)
+
+    def start_preview(self, job_id):
+        """Kick off background generation of the mask preview video."""
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.status != "done":
+                raise ValueError(
+                    f"Only finished jobs support mask preview (job is {job.status})"
+                )
+            if job.preview_status == "generating":
+                raise ValueError("Preview is already generating for this job")
+            if self._preview_active_job is not None:
+                raise ValueError(
+                    "Another preview is already generating; please wait for it to finish"
+                )
+            tars = [p for p in job.tar_result_paths() if osp.isfile(p)]
+            if not tars:
+                raise ValueError(
+                    "No tar result files for this job "
+                    "(results were saved as mp4 or already deleted)"
+                )
+            job.preview_status = "generating"
+            job.preview_progress = 0.0
+            job.preview_error = None
+            self._preview_active_job = job_id
+        thread = threading.Thread(
+            target=self._preview_worker, args=(job,),
+            name=f"seg-preview-{job_id}", daemon=True,
+        )
+        thread.start()
+        return job.to_dict()
+
+    def _set_preview_progress(self, job, value):
+        with self._lock:
+            if job.status == "done" and job.preview_status == "generating":
+                job.preview_progress = max(0.0, min(1.0, float(value)))
+
+    def _preview_worker(self, job):
+        try:
+            self._generate_preview(job)
+            with self._lock:
+                if job.preview_status == "generating":
+                    job.preview_status = "ready"
+                    job.preview_progress = 1.0
+        except Exception as err:  # noqa: BLE001
+            with self._lock:
+                if job.preview_status == "generating":
+                    job.preview_status = "error"
+                    job.preview_error = f"{type(err).__name__}: {err}"
+            traceback.print_exc()
+        finally:
+            with self._lock:
+                if self._preview_active_job == job.job_id:
+                    self._preview_active_job = None
+
+    def _generate_preview(self, job):
+        """Extract the job's tars, merge per-object masks into rgba pngs under
+        ./generated_mask_videos/<mask_name>/, then encode the white-background
+        preview mp4 ./generated_mask_videos/<mask_name>_mask.mp4."""
+        tars = [p for p in job.tar_result_paths() if osp.isfile(p)]
+        png_dir = job.preview_png_dir()
+        out_mp4 = job.preview_mp4_path()
+        os.makedirs(MASK_PNG_ROOT, exist_ok=True)
+        tmp_root = osp.join(MASK_PNG_ROOT, ".tmp_extract", job.job_id)
+        if osp.isdir(tmp_root):
+            shutil.rmtree(tmp_root, ignore_errors=True)
+        os.makedirs(tmp_root, exist_ok=True)
+        try:
+            # 1) extract every tar into its own folder (progress 0.00 -> 0.08)
+            for i, tar_path in enumerate(tars):
+                tar_name = osp.basename(tar_path).split(".")[0]
+                extract_path = osp.join(tmp_root, tar_name)
+                os.makedirs(extract_path, exist_ok=True)
+                with tarfile.open(tar_path, "r") as tar:
+                    tar.extractall(path=extract_path, filter="data")
+                self._set_preview_progress(job, 0.08 * (i + 1) / len(tars))
+
+            img_dirs = sorted(f.path for f in os.scandir(tmp_root) if f.is_dir())
+            if not img_dirs:
+                raise ValueError("Tar file(s) contained no frame folders")
+
+            # wipe stale generated frames, then write the (merged) set
+            if osp.isdir(png_dir):
+                shutil.rmtree(png_dir, ignore_errors=True)
+            os.makedirs(png_dir, exist_ok=True)
+
+            if len(img_dirs) == 1:
+                # single object: just relayout the extracted rgba frames
+                src = img_dirs[0]
+                for name in sorted(os.listdir(src)):
+                    if name.lower().endswith(".png") and not name.startswith("."):
+                        shutil.move(osp.join(src, name), osp.join(png_dir, name))
+                self._set_preview_progress(job, 0.55)
+            else:
+                # multiple objects: overlay frame-by-frame (first = bottom layer)
+                img_lists = []
+                for d in img_dirs:
+                    img_lists.append(sorted(
+                        osp.join(d, n) for n in os.listdir(d)
+                        if n.lower().endswith(".png") and not n.startswith(".")
+                    ))
+                lengths = [len(x) for x in img_lists]
+                if len(set(lengths)) != 1:
+                    raise ValueError(f"Object frame counts differ: {lengths}")
+                n_frames = lengths[0]
+                if n_frames == 0:
+                    raise ValueError("No png frames found inside the tar file(s)")
+
+                done = {"n": 0}
+                done_lock = threading.Lock()
+
+                def merge_frame(i):
+                    datas = [
+                        cv2.imread(img_list[i], cv2.IMREAD_UNCHANGED)
+                        for img_list in img_lists
+                    ]
+                    if any(d is None for d in datas):
+                        raise ValueError(f"Failed to read a frame at index {i}")
+                    frame = datas[0].copy()
+                    for img in datas[1:]:
+                        m = img[..., 3] > 0
+                        frame[m] = img[m]
+                    cv2.imwrite(osp.join(png_dir, f"{i:08d}.png"), frame)
+                    with done_lock:
+                        done["n"] += 1
+                        self._set_preview_progress(
+                            job, 0.08 + 0.47 * done["n"] / n_frames
+                        )
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(merge_frame, range(n_frames)))
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+        frame_paths = sorted(
+            osp.join(png_dir, n) for n in os.listdir(png_dir)
+            if n.lower().endswith(".png")
+        )
+        if not frame_paths:
+            raise ValueError("No mask frames generated")
+        self._encode_preview_video(job, frame_paths, out_mp4)
+
+    def _encode_preview_video(self, job, frame_paths, out_path):
+        """Encode 'white background + original pixels inside the mask' mp4."""
+        try:
+            import imageio  # lazy: only needed while generating a preview
+        except ImportError as err:
+            raise RuntimeError(
+                "imageio / imageio-ffmpeg is required to encode the mask preview mp4"
+            ) from err
+        writer = imageio.get_writer(
+            out_path, fps=30, codec="libx264", quality=5,
+            ffmpeg_params=["-movflags", "+faststart"],
+        )
+        try:
+            n = len(frame_paths)
+            for i, path in enumerate(frame_paths):
+                data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                if data is None or data.ndim < 3:
+                    raise ValueError(f"Failed to read mask frame: {path}")
+                frame = data[:, :, :3].copy()
+                alpha = data[:, :, 3]
+                frame[alpha == 0] = 255  # white outside the segmented region
+                writer.append_data(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                self._set_preview_progress(job, 0.55 + 0.45 * (i + 1) / n)
+        finally:
+            writer.close()
+
+    def accept_job(self, job_id):
+        """Move the generated rgba frames to ./videos/<garment>/<mask_name>/."""
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.status != "done":
+                raise ValueError(f"Only finished jobs can be accepted (job is {job.status})")
+            png_dir = job.preview_png_dir()
+            has_pngs = osp.isdir(png_dir) and any(
+                n.lower().endswith(".png") for n in os.listdir(png_dir)
+            )
+            if not has_pngs:
+                raise ValueError("No generated mask frames to accept - press Preview first")
+            dest = job.accept_dest_dir()
+            if osp.exists(dest):
+                raise ValueError(f"Destination already exists: {dest}")
+            os.makedirs(osp.dirname(dest), exist_ok=True)
+            shutil.move(png_dir, dest)
+            job.accepted = True
+            job.message = f"Accepted: mask frames moved to {dest}"
+        return job.to_dict()
+
+    def delete_artifacts(self, job_id):
+        """Delete the job's saved result files, generated frames and preview
+        mp4. Frames already accepted under ./videos/ are kept."""
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.status != "done":
+                raise ValueError(f"Only finished jobs can be deleted (job is {job.status})")
+            removed = []
+            for path in list(job.saved_paths):
+                if osp.isfile(path):
+                    os.remove(path)
+                    removed.append(path)
+            png_dir = job.preview_png_dir()
+            if osp.isdir(png_dir):
+                shutil.rmtree(png_dir, ignore_errors=True)
+                removed.append(png_dir)
+            out_mp4 = job.preview_mp4_path()
+            if osp.isfile(out_mp4):
+                os.remove(out_mp4)
+                removed.append(out_mp4)
+            job.accepted = osp.isdir(job.accept_dest_dir())
+            job.preview_status = "none"
+            job.preview_progress = 0.0
+            job.preview_error = None
+            job.message = (
+                f"Deleted {len(removed)} result item(s); "
+                "accepted frames under videos/ were kept"
+                if removed else "Nothing left to delete"
+            )
+        return {"ok": True, "removed": removed, "job": job.to_dict()}
 
     # ------------------------------------------------------------- worker
     def _worker_loop(self):
@@ -1882,6 +2308,9 @@ class SegmentationQueue:
                         job.finished_at = time.time()
                 traceback.print_exc()
             with self._cond:
+                # 追加要求1: persist now that the job reached a terminal state
+                if job.status in ("done", "error", "cancelled"):
+                    self._persist_finished()
                 self._cond.notify_all()
 
     # ------------------------------------------------------------- run one job
@@ -1952,6 +2381,8 @@ class SegmentationQueue:
                 job.finished_at = time.time()
             else:
                 self._move_memory_to_device(memory_list, device)
+                # 追加要求1: start the ETA clock right before frame processing
+                job.frames_started_at = time.time()
                 job.message = f"Segmenting {total_frames} frames..."
 
         # Early exit: nothing to segment
@@ -2261,6 +2692,47 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_file_range(self, path, content_type):
+        """Stream a file with HTTP Range support (needed for <video> seeking)."""
+        size = os.path.getsize(path)
+        range_header = self.headers.get("Range")
+        if range_header and range_header.startswith("bytes="):
+            try:
+                range_spec = range_header[len("bytes="):]
+                start_str, _, end_str = range_spec.partition("-")
+                start = int(start_str) if start_str else 0
+                end = int(end_str) if end_str else size - 1
+                start = max(0, min(start, size - 1))
+                end = max(start, min(end, size - 1))
+                length = end - start + 1
+                self.send_response(206)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.send_header("Content-Length", str(length))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with open(path, "rb") as fh:
+                    fh.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = fh.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+                return
+            except (ValueError, OverflowError):
+                pass  # fall back to a full-body response
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with open(path, "rb") as fh:
+            shutil.copyfileobj(fh, self.wfile, length=1024 * 1024)
+
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b""
@@ -2400,6 +2872,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(self.session.display(advance=advance))
         if route == "/api/seg/queue":
             return self._send_json(SEG_QUEUE.status())
+        if route == "/api/seg/preview_video":
+            job_id = (qs.get("job_id") or [""])[0]
+            job = SEG_QUEUE.get_job(job_id)
+            mp4 = job.preview_mp4_path() if job is not None else None
+            if job is None or job.status != "done" or not mp4 or not osp.isfile(mp4):
+                return self._send_json(
+                    {"ok": False, "error": "Preview video not found (press Preview to generate it first)"},
+                    status=404,
+                )
+            return self._send_file_range(mp4, "video/mp4")
         if route == "/api/seg/browse":
             path = (qs.get("path") or [""])[0]
             kind = (qs.get("kind") or ["video"])[0]
@@ -2483,6 +2965,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True, "job": job})
         if route == "/api/seg/clear":
             return self._send_json({"ok": True, **SEG_QUEUE.clear_finished()})
+        if route == "/api/seg/preview":
+            job = SEG_QUEUE.start_preview(body.get("job_id"))
+            return self._send_json({"ok": True, "job": job})
+        if route == "/api/seg/accept":
+            job = SEG_QUEUE.accept_job(body.get("job_id"))
+            return self._send_json({"ok": True, "job": job})
+        if route == "/api/seg/delete":
+            return self._send_json(SEG_QUEUE.delete_artifacts(body.get("job_id")))
         self._send_json({"ok": False, "error": f"No such route: {route}"}, status=404)
 
     # --- verb entrypoints ----------------------------------------------------
@@ -2535,6 +3025,11 @@ def main():
     # behave exactly like in the original script
     os.chdir(_REPO_ROOT)
 
+    # Remove tar extraction leftovers from a previous (possibly crashed) run
+    stale_tmp = osp.join(MASK_PNG_ROOT, ".tmp_extract")
+    if osp.isdir(stale_tmp):
+        shutil.rmtree(stale_tmp, ignore_errors=True)
+
     # Start the background video-segmentation task queue (Task 2)
     SEG_QUEUE.start()
 
@@ -2561,6 +3056,8 @@ def main():
     print(f"  Tracking state saves go to: {STATE_SAVE_DIR}/<video_stem>.pt")
     print(f"  Uploaded video folders go to: {UPLOAD_ROOT}/<folder_name>/")
     print(f"  Segmentation results go to: <repo_root>/saved_images/run_video/<video_stem>/")
+    print(f"  Finished segmentation jobs persist in: {JOB_HISTORY_FILE}")
+    print(f"  Mask previews: {MASK_PNG_ROOT}/<video_stem>/ (frames) + <video_stem>_mask.mp4")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

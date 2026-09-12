@@ -43,6 +43,7 @@ const state = {
   seenLog: [],
   dirSelected: null,  // absolute path of selected entry (file or folder) in the Open dialog
   dirSelectedIsDir: null,
+  segJobs: [],        // last segmentation queue snapshot (for button handlers)
 };
 
 // ------------------------------------------------------------------ helpers
@@ -1205,6 +1206,50 @@ function segStatusLabel(job) {
   return job.status; // queued | done | error | cancelled
 }
 
+// 追加要求1: human-readable duration for the ETA display
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+// 追加要求2: the Preview button has 3 visual states:
+//   none -> "Preview" (starts generation)
+//   generating -> circular progress ring + percent
+//   ready -> play icon (opens the video dialog)
+const RING_CIRC = 50.265; // 2 * PI * 8
+function segPreviewButtonHtml(job) {
+  const id = escHtml(job.job_id);
+  const st = job.preview_status || "none";
+  if (st === "generating") {
+    const p = Math.max(0, Math.min(1, job.preview_progress || 0));
+    const off = (RING_CIRC * (1 - p)).toFixed(2);
+    return `<button class="seg-preview generating" data-id="${id}" disabled
+      title="Generating mask preview video...">
+      <svg class="seg-ring" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
+        <circle class="seg-ring-bg" cx="10" cy="10" r="8"></circle>
+        <circle class="seg-ring-fg" cx="10" cy="10" r="8"
+          stroke-dasharray="${RING_CIRC.toFixed(2)}" stroke-dashoffset="${off}"></circle>
+      </svg>
+      <span>${Math.round(p * 100)}%</span>
+    </button>`;
+  }
+  if (st === "ready") {
+    return `<button class="seg-preview ready" data-id="${id}"
+      title="Play the generated mask preview video">&#x25B6;</button>`;
+  }
+  const title = job.has_tars
+    ? "Generate the mask preview video (frames go to ./generated_mask_videos/<name>/)"
+    : "Unavailable: this job has no tar results (saved as mp4 or deleted)";
+  const extra = st === "error" ? " error" : "";
+  return `<button class="seg-preview${extra}" data-id="${id}"
+    ${job.has_tars ? "" : "disabled"} title="${title}">Preview</button>`;
+}
+
 function segJobHtml(job) {
   const cls = job.status; // queued|running|done|error|cancelled
   const pct = Math.max(0, Math.min(100, (job.progress || 0) * 100));
@@ -1214,11 +1259,33 @@ function segJobHtml(job) {
   } else if (job.status === "running") {
     frames = job.phase === "loading" ? "loading\u2026" : "starting\u2026";
   }
+  // 追加要求1: estimated remaining time for the running job
+  if (job.status === "running" && job.eta_seconds != null && job.total_frames > 0) {
+    frames += ` \u00b7 ~${fmtDuration(job.eta_seconds)} left`;
+  }
   let resultsHtml = "";
   if (job.saved_paths && job.saved_paths.length) {
     resultsHtml = `<div class="seg-job-results">saved: ${job.saved_paths.map(escHtml).join(", ")}</div>`;
   }
   const errHtml = job.error ? `<div class="seg-job-err">${escHtml(job.error)}</div>` : "";
+  let previewErrHtml = "";
+  if (job.status === "done" && job.preview_status === "error" && job.preview_error) {
+    previewErrHtml = `<div class="seg-job-err">preview: ${escHtml(job.preview_error)}</div>`;
+  }
+  // 追加要求2: bottom-right actions for finished jobs
+  let actionsHtml = "";
+  if (job.status === "done") {
+    const acceptTitle = job.accepted
+      ? "Mask frames already moved to ./videos/<garment>/<name>/"
+      : "Move the generated mask frames to ./videos/<garment>/<name>/";
+    actionsHtml = `<div class="seg-job-actions">
+      ${segPreviewButtonHtml(job)}
+      <button class="seg-accept" data-id="${escHtml(job.job_id)}"
+        ${job.has_tars ? "" : "disabled"} title="${acceptTitle}">Accept</button>
+      <button class="seg-delete danger" data-id="${escHtml(job.job_id)}"
+        title="Delete this job's result files (tars/mp4), generated mask frames and the preview video. Frames already accepted under ./videos/ are kept.">Delete</button>
+    </div>`;
+  }
   const canCancel = job.status === "queued" || job.status === "running";
   const cancelBtn = canCancel
     ? `<button class="seg-cancel danger" data-id="${escHtml(job.job_id)}">Cancel</button>` : "";
@@ -1233,7 +1300,9 @@ function segJobHtml(job) {
     <div class="seg-prog"><div class="seg-prog-fill" style="width:${pct}%"></div></div>
     ${job.message ? `<div class="seg-job-msg">${escHtml(job.message)}</div>` : ""}
     ${errHtml}
+    ${previewErrHtml}
     ${resultsHtml}
+    ${actionsHtml}
   </div>`;
 }
 
@@ -1242,6 +1311,7 @@ function renderSegQueue(data) {
   const scrollTop = list ? list.scrollTop : 0;
   const jobs = (data && data.jobs) || [];
   const c = (data && data.counts) || {};
+  state.segJobs = jobs;
 
   // Summary line in the queue legend
   const parts = [];
@@ -1290,6 +1360,16 @@ function renderSegQueue(data) {
 
   list.querySelectorAll(".seg-cancel").forEach((btn) => {
     btn.onclick = () => cancelSegJob(btn.dataset.id);
+  });
+  // 追加要求2: Preview (generate ring -> play), Accept, Delete
+  list.querySelectorAll(".seg-preview").forEach((btn) => {
+    btn.onclick = () => onPreviewClick(btn.dataset.id);
+  });
+  list.querySelectorAll(".seg-accept").forEach((btn) => {
+    btn.onclick = () => acceptSegJob(btn.dataset.id);
+  });
+  list.querySelectorAll(".seg-delete").forEach((btn) => {
+    btn.onclick = () => deleteSegJob(btn.dataset.id);
   });
 }
 
@@ -1363,6 +1443,76 @@ async function cancelSegJob(jobId) {
 async function clearSegDone() {
   try {
     await api("/api/seg/clear", { method: "POST", body: {} });
+    await pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+// ---- 追加要求2: preview / accept / delete for finished jobs ----
+
+function segJobById(jobId) {
+  return (state.segJobs || []).find((j) => j.job_id === jobId) || null;
+}
+
+async function onPreviewClick(jobId) {
+  const job = segJobById(jobId);
+  if (!job) return;
+  if (job.preview_status === "generating") return; // ring is visible; wait
+  if (job.preview_status === "ready") {
+    openSegPreview(job);
+    return;
+  }
+  // "none" (or retry after an error): start generation
+  try {
+    await api("/api/seg/preview", { method: "POST", body: { job_id: jobId } });
+    toast("Generating mask preview video\u2026");
+    await pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+function openSegPreview(job) {
+  const video = $("seg-preview-video");
+  $("seg-preview-title").textContent =
+    `Mask preview \u00b7 ${job.label || job.job_id}`;
+  video.src = job.preview_url;
+  $("seg-preview-dialog").style.display = "flex";
+  video.play().catch(() => { /* user can press play manually */ });
+}
+
+function closeSegPreview() {
+  const video = $("seg-preview-video");
+  video.pause();
+  video.removeAttribute("src");
+  video.load(); // stop downloading
+  $("seg-preview-dialog").style.display = "none";
+}
+
+async function acceptSegJob(jobId) {
+  const ok = confirm(
+    "Move this job's generated mask frames to ./videos/<garment>/<name>/ ?"
+  );
+  if (!ok) return;
+  try {
+    await api("/api/seg/accept", { method: "POST", body: { job_id: jobId } });
+    toast("Mask frames accepted");
+    await pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+async function deleteSegJob(jobId) {
+  const ok = confirm(
+    "Delete this job's result files (tars/mp4), generated mask frames and the " +
+    "preview video?\n\nFrames already accepted under ./videos/ will be kept."
+  );
+  if (!ok) return;
+  try {
+    await api("/api/seg/delete", { method: "POST", body: { job_id: jobId } });
+    toast("Result files deleted");
     await pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
@@ -1476,6 +1626,17 @@ function wireSeg() {
     segBrowseCtx = null;
   };
   $("seg-browse-ok").onclick = confirmSegBrowse;
+
+  // 追加要求2: mask preview video dialog
+  $("seg-preview-close").onclick = closeSegPreview;
+  $("seg-preview-dialog").addEventListener("click", (evt) => {
+    if (evt.target === $("seg-preview-dialog")) closeSegPreview();
+  });
+  document.addEventListener("keydown", (evt) => {
+    if (evt.key === "Escape" && $("seg-preview-dialog").style.display !== "none") {
+      closeSegPreview();
+    }
+  });
 }
 
 // ------------------------------------------------------------------ wiring

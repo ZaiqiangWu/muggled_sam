@@ -510,6 +510,65 @@ input[type="range"] { width: 100%; }
 
 .seg-cancel { padding: 1px 8px; font-size: 11px; }
 
+/* 追加要求2: finished-job actions (bottom-right of the job card) */
+.seg-job-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 2px;
+}
+.seg-preview,
+.seg-accept {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 10px;
+  font-size: 11px;
+}
+.seg-preview.ready { padding: 0 9px; font-size: 13px; line-height: 18px; }
+.seg-preview.error { border-color: var(--danger); }
+.seg-delete { padding: 1px 8px; font-size: 11px; }
+
+/* circular progress ring inside the Preview button */
+.seg-ring { display: block; transform: rotate(-90deg); }
+.seg-ring circle { fill: none; }
+.seg-ring-bg { stroke: var(--border); stroke-width: 3; }
+.seg-ring-fg {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+
+/* 追加要求2: mask preview video dialog */
+.video-modal-card { width: min(92vw, 980px); }
+.video-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.video-modal-head h2 { margin: 0; font-size: 15px; }
+.video-modal-close {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 10px;
+  border-radius: 6px;
+}
+.video-modal-close:hover { color: var(--danger); background: var(--panel2); }
+#seg-preview-video {
+  display: block;
+  width: 100%;
+  max-height: 72vh;
+  background: #000;
+  border-radius: 6px;
+}
+
 @media (max-width: 900px) {
   .seg-grid { grid-template-columns: 1fr; }
   .seg-col-queue { max-height: none; }
