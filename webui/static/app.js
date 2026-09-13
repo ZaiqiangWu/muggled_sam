@@ -1298,10 +1298,15 @@ function segJobHtml(job) {
     ? `<button class="seg-job-remove danger" data-id="${escHtml(job.job_id)}"
         title="Remove this cancelled task from the list">Delete</button>` : "";
   const statusLabel = segStatusLabel(job);
+  const ptCount = (job.prompt_paths || []).length;
+  const ptChip = ptCount > 1
+    ? `<span class="seg-job-frames" title="${escHtml(job.prompt_paths.join("\n"))}">${ptCount} \u00d7 .pt merged</span>`
+    : "";
   return `<div class="seg-job ${cls}">
     <div class="seg-job-head">
       <span class="seg-status ${cls}">${statusLabel}</span>
       <span class="seg-job-label" title="${escHtml(job.video_path)}">${escHtml(job.label)}</span>
+      ${ptChip}
       <span class="seg-job-frames">${frames}</span>
       ${cancelBtn}
       ${removeBtn}
@@ -1411,14 +1416,21 @@ function readSegConfig() {
 
 async function submitSegTask() {
   const type = $("seg-type").value;
-  const prompt = $("seg-prompt").value.trim();
+  const promptPaths = Array.from(document.querySelectorAll("#seg-prompt-list input[type=text]"))
+    .map((el) => el.value.trim())
+    .filter(Boolean);
   const video = $("seg-video").value.trim();
   const dir = $("seg-dir").value.trim();
   const hint = $("seg-submit-hint");
   hint.style.color = "var(--danger)";
 
-  if (!prompt) { hint.textContent = "Pick a prompt (.pt) file"; return; }
-  const body = { kind: type, prompt_path: prompt, config: readSegConfig() };
+  if (!promptPaths.length) { hint.textContent = "Pick a prompt (.pt) file"; return; }
+  const body = {
+    kind: type,
+    prompt_path: promptPaths[0],
+    prompt_paths: promptPaths,
+    config: readSegConfig(),
+  };
   if (type === "video") {
     if (!video) { hint.textContent = "Pick an input video"; return; }
     body.video_path = video;
@@ -1564,6 +1576,41 @@ async function deleteSegJob(jobId) {
 // ---- segmentation file/folder browse ----
 let segBrowseCtx = null; // { kind, targetId, currentPath, sel }
 
+let segPromptRowSeq = 0;
+
+function addSegPromptRow(value) {
+  const list = $("seg-prompt-list");
+  const row = document.createElement("div");
+  row.className = "row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = "seg-prompt-" + segPromptRowSeq++;
+  input.placeholder = "server path to a tracking-state .pt file";
+  input.value = value || "";
+  const browse = document.createElement("button");
+  browse.type = "button";
+  browse.textContent = "Browse";
+  browse.onclick = () => openSegBrowse("pt", input.id, input.value);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "seg-prompt-remove";
+  remove.title = "Remove this .pt file";
+  remove.textContent = "\u2715";
+  remove.onclick = () => {
+    if (list.children.length > 1) {
+      row.remove();
+    } else {
+      input.value = "";
+      input.focus();
+    }
+  };
+  row.appendChild(input);
+  row.appendChild(browse);
+  row.appendChild(remove);
+  list.appendChild(row);
+  return input;
+}
+
 function openSegBrowse(kind, targetId, startPath) {
   segBrowseCtx = {
     kind, targetId,
@@ -1649,7 +1696,8 @@ function wireSeg() {
     $("seg-dir-field").style.display = t === "dir" ? "" : "none";
   };
   $("seg-submit").onclick = () => submitSegTask();
-  $("seg-prompt-browse").onclick = () => openSegBrowse("pt", "seg-prompt", $("seg-prompt").value);
+  addSegPromptRow();
+  $("seg-prompt-add").onclick = () => addSegPromptRow();
   $("seg-video-browse").onclick = () => openSegBrowse("video", "seg-video", $("seg-video").value);
   $("seg-dir-browse").onclick = () => openSegBrowse("dir", "seg-dir", $("seg-dir").value);
   $("seg-clear-all").onclick = () => clearSegAll();

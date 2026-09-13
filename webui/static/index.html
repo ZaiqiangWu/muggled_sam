@@ -198,10 +198,11 @@
             </div>
 
             <div class="seg-field">
-              <span class="seg-label">Prompt file (.pt)</span>
-              <div class="row">
-                <input type="text" id="seg-prompt" placeholder="server path to a tracking-state .pt file">
-                <button id="seg-prompt-browse">Browse</button>
+              <span class="seg-label">Prompt file(s) (.pt)</span>
+              <div id="seg-prompt-list"></div>
+              <div class="row" style="margin-top:4px">
+                <button id="seg-prompt-add" type="button">+ Add another .pt</button>
+                <span class="hint">Add more .pt files of the same object (from other videos) to merge them into one exemplar bank.</span>
               </div>
             </div>
 

@@ -423,7 +423,10 @@ input[type="range"] { width: 100%; }
 .seg-field { display: flex; flex-direction: column; gap: 4px; }
 .seg-label { color: var(--muted); font-size: 12px; }
 .seg-field .row { width: 100%; }
-.seg-field input[type="text"] { flex: 1; min-width: 0; }
+.seg-field input[type="text"] { flex: 1; min-width: 0; direction: rtl; text-align: left; }
+#seg-prompt-list { display: flex; flex-direction: column; gap: 4px; }
+.seg-prompt-remove { padding: 5px 8px; color: var(--muted); }
+.seg-prompt-remove:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
 
 .seg-queue-list {
   display: flex;

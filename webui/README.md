@@ -150,6 +150,13 @@ Pick a **Task type**:
   The folder's top-level `*.mp4` files are each queued as their own job (same
   as the script, which runs the per-video script on each clip).
 
+**Multiple prompt files**: use **+ Add another .pt** to attach more .pt files
+(e.g. the same object authored from different videos). All listed files must
+describe the same object(s); their exemplar banks are merged into one bank
+before segmentation (each file's stale prevframe history is dropped, and the
+merged bank is capped at the 32 prompt-memory limit). The task bar then shows
+a `N × .pt merged` chip.
+
 The **Settings** dropdown exposes the relevant `load_prompts_run_video.py`
 parameters: model path, device, base size, num buffers, background color,
 ffmpeg path, aspect-ratio / float32, and the `--pure_text` mode (runs each
@@ -220,7 +227,9 @@ output layout as the script.
 ### Segmentation API
 
 - `GET  /api/seg/queue` — queue + counts + progress
-- `POST /api/seg/submit` — `{kind, prompt_path, video_path|input_dir, config}`
+- `POST /api/seg/submit` — `{kind, prompt_path, prompt_paths?, video_path|input_dir, config}`;
+  `prompt_paths` is a list of .pt files of the same object whose exemplar
+  banks are merged (legacy single-`prompt_path` still works)
 - `POST /api/seg/cancel` — `{job_id}`
 - `POST /api/seg/clear` — **Clear all**: remove finished jobs + wipe all
   generated artifacts (clear_all.sh equivalent)

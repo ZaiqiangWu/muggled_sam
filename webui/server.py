@@ -1638,10 +1638,15 @@ class SegJob:
     """One queued video-segmentation job (a single input video + prompt file)."""
 
     def __init__(self, job_id, kind, prompt_path, video_path, config,
-                 batch_id=None, batch_label=None):
+                 batch_id=None, batch_label=None, prompt_paths=None):
         self.job_id = job_id
         self.kind = kind                      # "video"
-        self.prompt_path = prompt_path        # .pt file (as given)
+        self.prompt_path = prompt_path        # first .pt file (as given)
+        # All .pt files for this job (merged into one exemplar bank when >1)
+        self.prompt_paths = (
+            [str(p) for p in prompt_paths] if prompt_paths
+            else ([str(prompt_path)] if prompt_path else [])
+        )
         self.video_path = video_path          # input video (as given / resolved)
         self.config = config                  # normalized dict
         self.batch_id = batch_id              # groups a folder's jobs (None for singles)
@@ -1740,6 +1745,7 @@ class SegJob:
             "batch_label": self.batch_label,
             "label": self.label,
             "prompt_path": self.prompt_path,
+            "prompt_paths": list(self.prompt_paths),
             "video_path": self.video_path,
             "status": self.status,
             "phase": self.phase,
@@ -1770,6 +1776,7 @@ class SegJob:
             "batch_id": self.batch_id,
             "batch_label": self.batch_label,
             "prompt_path": self.prompt_path,
+            "prompt_paths": list(self.prompt_paths),
             "video_path": self.video_path,
             "config": dict(self.config),
             "status": self.status,
@@ -1854,6 +1861,7 @@ class SegmentationQueue:
                     config=_normalize_seg_config(dict(d.get("config") or {})),
                     batch_id=d.get("batch_id"),
                     batch_label=d.get("batch_label"),
+                    prompt_paths=d.get("prompt_paths"),
                 )
             except Exception:  # noqa: BLE001
                 continue
@@ -1940,13 +1948,27 @@ class SegmentationQueue:
         return model, model.name
 
     # ------------------------------------------------------------- submission
-    def submit(self, kind, prompt_path, video_path=None, input_dir=None, config=None):
-        """Queue a segmentation task. kind: 'video' or 'dir'. Returns created jobs."""
-        if not prompt_path or not str(prompt_path).strip():
+    def submit(self, kind, prompt_path=None, video_path=None, input_dir=None,
+               config=None, prompt_paths=None):
+        """Queue a segmentation task. kind: 'video' or 'dir'. Returns created jobs.
+
+        ``prompt_paths`` may list several .pt files (all describing the same
+        object(s)); they are merged into one exemplar bank before running.
+        """
+        if isinstance(prompt_paths, str):
+            prompt_paths = [prompt_paths]
+        raw_paths = list(prompt_paths) if prompt_paths else ([prompt_path] if prompt_path else [])
+        raw_paths = [str(p).strip() for p in raw_paths if p and str(p).strip()]
+        if not raw_paths:
             raise ValueError("A prompt (.pt) file path is required")
-        prompt_path = self._resolve_path(str(prompt_path))
-        if not osp.isfile(prompt_path):
-            raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
+        resolved_paths = []
+        for raw in raw_paths:
+            rp = self._resolve_path(raw)
+            if not osp.isfile(rp):
+                raise FileNotFoundError(f"Prompt file not found: {rp}")
+            if rp not in resolved_paths:
+                resolved_paths.append(rp)
+        prompt_path = resolved_paths[0]
 
         cfg = _normalize_seg_config(dict(config) if config else {})
 
@@ -1963,7 +1985,7 @@ class SegmentationQueue:
                     raise FileNotFoundError(f"Video file not found: {vpath}")
                 job = SegJob(
                     job_id=self._next_id("j"), kind="video", prompt_path=prompt_path,
-                    video_path=vpath, config=cfg,
+                    video_path=vpath, config=cfg, prompt_paths=resolved_paths,
                 )
                 self._register(job)
                 created.append(job)
@@ -1986,6 +2008,7 @@ class SegmentationQueue:
                         job_id=self._next_id("j"), kind="video", prompt_path=prompt_path,
                         video_path=osp.join(dpath, name), config=cfg,
                         batch_id=batch_id, batch_label=batch_label,
+                        prompt_paths=resolved_paths,
                     )
                     self._register(job)
                     created.append(job)
@@ -2477,34 +2500,54 @@ class SegmentationQueue:
         with self._lock:
             job.total_frames = total_frames
             job.current_frame = 0
-            job.message = f"Loading prompts from {osp.basename(job.prompt_path)}..."
+            if len(job.prompt_paths) == 1:
+                job.message = f"Loading prompts from {osp.basename(job.prompt_path)}..."
+            else:
+                names = ", ".join(osp.basename(p) for p in job.prompt_paths)
+                job.message = (
+                    f"Loading prompts from {len(job.prompt_paths)} files: {names}..."
+                )
 
-        # 3) prompt state
+        # 3) prompt state (one or more .pt files)
         torch.serialization.add_safe_globals([SAMVideoObjectResults, SAMVideoBuffer, deque])
-        loaded_data = torch.load(job.prompt_path, map_location=device, weights_only=False)
-        loaded_objects, saved_text_prompts = unpack_tracking_state(loaded_data)
+        loaded_states = []
+        for prompt_path in job.prompt_paths:
+            loaded_data = torch.load(prompt_path, map_location=device, weights_only=False)
+            loaded_states.append((prompt_path, *unpack_tracking_state(loaded_data)))
 
         num_obj_buffers = int(cfg["num_buffers"])
         use_pure_text = bool(cfg["pure_text"])
         pure_text_score_threshold = float(cfg["pure_text_score_threshold"])
 
+        # merge per-buffer text prompts across files (first file wins per buffer)
+        saved_text_prompts = {}
+        for _path, _objects, texts in loaded_states:
+            for objidx, text in texts.items():
+                saved_text_prompts.setdefault(objidx, text)
+
         if use_pure_text:
             if model_name != "samv3":
                 raise ValueError("--pure_text requires SAM3 model weights")
             if not saved_text_prompts:
-                raise ValueError("Prompt file has no per-buffer text prompts for --pure_text")
+                raise ValueError("Prompt files have no per-buffer text prompts for --pure_text")
             for objidx in saved_text_prompts:
                 if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
                     raise ValueError(
                         f"Prompt file contains invalid text-prompt buffer index: {objidx!r}"
                     )
 
-        # rebuild memory_list
-        memory_list = [None] * num_obj_buffers
-        for objidx, mem in loaded_objects.items():
-            if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
-                raise ValueError(f"Prompt file contains invalid object-buffer index: {objidx!r}")
-            memory_list[objidx] = mem
+        # rebuild memory_list (merge exemplar banks when several files were given)
+        if len(loaded_states) == 1:
+            _path, loaded_objects, _texts = loaded_states[0]
+            memory_list = [None] * num_obj_buffers
+            for objidx, mem in loaded_objects.items():
+                if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
+                    raise ValueError(
+                        f"Prompt file contains invalid object-buffer index: {objidx!r}"
+                    )
+                memory_list[objidx] = mem
+        else:
+            memory_list = self._merge_prompt_states(loaded_states, num_obj_buffers)
 
         with self._lock:
             if use_pure_text:
@@ -2515,7 +2558,7 @@ class SegmentationQueue:
             elif not any(m is not None and m.check_has_prompts() for m in memory_list):
                 job.status = "done"
                 job.phase = "idle"
-                job.message = "No valid prompts found in the .pt file - nothing to segment."
+                job.message = "No valid prompts found in the .pt file(s) - nothing to segment."
                 job.finished_at = time.time()
             else:
                 self._move_memory_to_device(memory_list, device)
@@ -2633,6 +2676,48 @@ class SegmentationQueue:
                 mem.obj_ptrs = [t.to(device) for t in mem.obj_ptrs]
             if hasattr(mem, "mask_preds"):
                 mem.mask_preds = [t.to(device) for t in mem.mask_preds]
+
+    @staticmethod
+    def _merge_prompt_states(loaded_states, num_obj_buffers):
+        """Merge several .pt prompt states into one memory_list.
+
+        All files must describe the same object(s): per buffer index their
+        prompt exemplars (idx / memory / pointer deques) are concatenated,
+        capped at the prompts_buffer maxlen. Each file's prevframe_buffer is
+        dropped - it holds stale 'recent frames' from its own source video,
+        and the tracker cold-starts fine with prompt memories only.
+        """
+        buffers_by_obj = {}
+        for path, objects, _texts in loaded_states:
+            for objidx, mem in objects.items():
+                if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
+                    raise ValueError(
+                        f"Prompt file {osp.basename(path)} contains invalid "
+                        f"object-buffer index: {objidx!r}"
+                    )
+                buffers_by_obj.setdefault(objidx, []).append(mem)
+
+        memory_list = [None] * num_obj_buffers
+        for objidx, mems in buffers_by_obj.items():
+            merged = SAMVideoObjectResults.create()
+            idx_max = merged.prompts_buffer.idx.maxlen
+            mem_max = merged.prompts_buffer.memory_history.maxlen
+            ptr_max = merged.prompts_buffer.pointer_history.maxlen
+            idx_all, mem_all, ptr_all = [], [], []
+            for mem in mems:
+                pb = mem.prompts_buffer
+                idx_all.extend(pb.idx)
+                mem_all.extend(pb.memory_history)
+                ptr_all.extend(pb.pointer_history)
+            merged.prompts_buffer.idx = deque(idx_all[:idx_max], maxlen=idx_max)
+            merged.prompts_buffer.memory_history = deque(
+                mem_all[:mem_max], maxlen=mem_max
+            )
+            merged.prompts_buffer.pointer_history = deque(
+                ptr_all[:ptr_max], maxlen=ptr_max
+            )
+            memory_list[objidx] = merged
+        return memory_list
 
     def _seg_track_frame(self, model, memory_list, objiter, save_masking,
                          imgenc_config_dict, savebuffers_list, frame,
@@ -3100,6 +3185,7 @@ class Handler(BaseHTTPRequestHandler):
             jobs = SEG_QUEUE.submit(
                 body.get("kind", "video"),
                 prompt_path=body.get("prompt_path"),
+                prompt_paths=body.get("prompt_paths"),
                 video_path=body.get("video_path"),
                 input_dir=body.get("input_dir"),
                 config=body.get("config"),
