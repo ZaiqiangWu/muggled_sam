@@ -2,7 +2,7 @@
 #SBATCH -p 032-partition
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH -o ngf32_dp2ta.out
+#SBATCH -o log_webui.out
 
 # 加载 conda
 source ~/workspace/anaconda3/etc/profile.d/conda.sh
