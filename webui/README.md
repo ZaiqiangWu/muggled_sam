@@ -195,16 +195,20 @@ Each finished job card has three buttons on the bottom right:
   progress bar, X in the top-right corner; the video just stops when finished,
   the window stays open). Requires `imageio` + `imageio-ffmpeg` (same as
   `util/multithread_video_writer.py`).
-
-Only one preview generates at a time. Pressing Preview while another one is
-generating adds the job to a FIFO queue: its button shows a 0% ring until its
-turn comes, then generation starts automatically (no need to re-press).
 - **Accept** — moves the generated frames to `./videos/<garment>/<video_stem>/`
   (`<garment>` is the video stem without its last `_`-separated part, exactly
   like `check_generated_masks.py`).
 - **Delete** — deletes the job's saved result files (tars or mp4), the
   generated frames and the preview mp4. Frames already accepted under
   `./videos/<garment>/<video_stem>/` are kept.
+
+Previews run **one at a time, in a FIFO queue**:
+- When a finished job has tar results, its preview is **queued automatically**
+  as soon as the job completes (the job message says "Mask preview queued").
+  Pressing Preview again is unnecessary (and a no-op while queued/generating).
+- Pressing Preview on any finished job while another preview is generating
+  adds it to the same queue: the button shows a 0% ring until its turn comes,
+  then generation starts automatically (no need to re-press).
 
 Preview/Accept need tar results; jobs saved as mp4 (ffmpeg configured) show
 those two buttons disabled.

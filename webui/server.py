@@ -2182,12 +2182,17 @@ class SegmentationQueue:
                 self._preview_active_job is not None
                 or len(self._preview_queue) > 0
             )
-            job.preview_status = "queued"
-            job.preview_progress = 0.0
-            job.preview_error = None
-            self._preview_queue.append(job.job_id)
-            self._cond.notify_all()
+            self._enqueue_preview_locked(job)
         return job.to_dict(), queued
+
+    def _enqueue_preview_locked(self, job):
+        """Add a finished job to the preview FIFO queue (state resets to a
+        0% "queued" ring). Must be called holding self._lock."""
+        job.preview_status = "queued"
+        job.preview_progress = 0.0
+        job.preview_error = None
+        self._preview_queue.append(job.job_id)
+        self._cond.notify_all()
 
     def _set_preview_progress(self, job, value):
         with self._lock:
@@ -2606,6 +2611,13 @@ class SegmentationQueue:
                     if n_saved else "Done. (no tracked objects produced output)"
                 )
                 job.finished_at = time.time()
+                # Auto-enqueue the mask preview: when the job has tar results,
+                # its preview generation joins the same FIFO queue (shown as a
+                # 0% ring until its turn). Jobs saved as mp4 have nothing to
+                # preview, so they are skipped.
+                if any(osp.isfile(p) for p in job.tar_result_paths()):
+                    self._enqueue_preview_locked(job)
+                    job.message += " Mask preview queued."
         else:
             job.saved_paths = []
 
