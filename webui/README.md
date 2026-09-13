@@ -195,6 +195,10 @@ Each finished job card has three buttons on the bottom right:
   progress bar, X in the top-right corner; the video just stops when finished,
   the window stays open). Requires `imageio` + `imageio-ffmpeg` (same as
   `util/multithread_video_writer.py`).
+
+Only one preview generates at a time. Pressing Preview while another one is
+generating adds the job to a FIFO queue: its button shows a 0% ring until its
+turn comes, then generation starts automatically (no need to re-press).
 - **Accept** — moves the generated frames to `./videos/<garment>/<video_stem>/`
   (`<garment>` is the video stem without its last `_`-separated part, exactly
   like `check_generated_masks.py`).
@@ -218,7 +222,9 @@ output layout as the script.
   generated artifacts (clear_all.sh equivalent)
 - `POST /api/seg/delete_job` — `{job_id}` remove a cancelled job's bar (also from the persisted history)
 - `GET  /api/seg/browse?path=&kind=pt|video|dir` — server path browser
-- `POST /api/seg/preview` — `{job_id}` start mask preview generation
+- `POST /api/seg/preview` — `{job_id}` start (or queue) mask preview
+  generation; returns `queued: true` when the job waits behind another
+  preview
 - `GET  /api/seg/preview_video?job_id=` — stream the preview mp4 (Range-aware)
 - `POST /api/seg/accept` — `{job_id}` move frames to `./videos/<garment>/<name>/`
 - `POST /api/seg/delete` — `{job_id}` delete the job's result artifacts

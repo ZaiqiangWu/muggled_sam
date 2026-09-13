@@ -1663,7 +1663,7 @@ class SegJob:
         # excludes model/prompt loading time)
         self.frames_started_at = None
         # 追加要求2: mask preview / accept / delete state (finished jobs only)
-        self.preview_status = "none"     # none | generating | ready | error
+        self.preview_status = "none"     # none | queued | generating | ready | error
         self.preview_progress = 0.0      # 0..1 while generating
         self.preview_error = None
         self.accepted = False
@@ -1725,7 +1725,9 @@ class SegJob:
         if self.status == "done":
             has_tars = any(osp.isfile(p) for p in self.tar_result_paths())
             accepted = osp.isdir(self.accept_dest_dir())
-            if preview_status != "generating":
+            # "queued" and "generating" are live worker states: keep them as
+            # is. Otherwise derive the state from what exists on disk.
+            if preview_status not in ("generating", "queued"):
                 if osp.isfile(self.preview_mp4_path()):
                     preview_status = "ready"
                     preview_url = f"/api/seg/preview_video?job_id={self.job_id}"
@@ -1796,7 +1798,11 @@ class SegmentationQueue:
         self._counter = 0
         # 追加要求1: finished-job persistence (survives restarts)
         self._history_loaded = False
-        # 追加要求2: at most one mask preview generates at a time
+        # 追加要求2: at most one mask preview generates at a time; further
+        # requests wait in this FIFO queue (their bars show a 0% progress
+        # ring until their turn starts)
+        self._preview_queue = deque()
+        self._preview_worker_thread = None
         self._preview_active_job = None
         # cached model
         self._model = None
@@ -1812,6 +1818,12 @@ class SegmentationQueue:
                     target=self._worker_loop, name="seg-queue-worker", daemon=True
                 )
                 self._worker.start()
+            if self._preview_worker_thread is None:
+                self._preview_worker_thread = threading.Thread(
+                    target=self._preview_worker_loop,
+                    name="seg-preview-worker", daemon=True,
+                )
+                self._preview_worker_thread.start()
 
     # ------------------------------------------------------------- persistence
     def _load_history(self):
@@ -2139,7 +2151,13 @@ class SegmentationQueue:
             return self._by_id.get(job_id)
 
     def start_preview(self, job_id):
-        """Kick off background generation of the mask preview video."""
+        """Queue the job for background mask-preview generation.
+
+        At most one preview generates at a time. If another preview is
+        already generating, this job simply waits in the FIFO queue (its bar
+        shows a 0% ring) and starts automatically when its turn comes.
+        Returns (job_dict, queued) where queued is True when the job has to
+        wait behind another preview."""
         with self._lock:
             job = self._by_id.get(job_id)
             if job is None:
@@ -2148,11 +2166,9 @@ class SegmentationQueue:
                 raise ValueError(
                     f"Only finished jobs support mask preview (job is {job.status})"
                 )
-            if job.preview_status == "generating":
-                raise ValueError("Preview is already generating for this job")
-            if self._preview_active_job is not None:
+            if job.preview_status in ("queued", "generating"):
                 raise ValueError(
-                    "Another preview is already generating; please wait for it to finish"
+                    "Preview is already queued or generating for this job"
                 )
             tars = [p for p in job.tar_result_paths() if osp.isfile(p)]
             if not tars:
@@ -2160,39 +2176,59 @@ class SegmentationQueue:
                     "No tar result files for this job "
                     "(results were saved as mp4 or already deleted)"
                 )
-            job.preview_status = "generating"
+            # This job starts immediately only if nothing is generating and
+            # nothing is already waiting ahead of it in the queue.
+            queued = (
+                self._preview_active_job is not None
+                or len(self._preview_queue) > 0
+            )
+            job.preview_status = "queued"
             job.preview_progress = 0.0
             job.preview_error = None
-            self._preview_active_job = job_id
-        thread = threading.Thread(
-            target=self._preview_worker, args=(job,),
-            name=f"seg-preview-{job_id}", daemon=True,
-        )
-        thread.start()
-        return job.to_dict()
+            self._preview_queue.append(job.job_id)
+            self._cond.notify_all()
+        return job.to_dict(), queued
 
     def _set_preview_progress(self, job, value):
         with self._lock:
             if job.status == "done" and job.preview_status == "generating":
                 job.preview_progress = max(0.0, min(1.0, float(value)))
 
-    def _preview_worker(self, job):
-        try:
-            self._generate_preview(job)
-            with self._lock:
-                if job.preview_status == "generating":
-                    job.preview_status = "ready"
-                    job.preview_progress = 1.0
-        except Exception as err:  # noqa: BLE001
-            with self._lock:
-                if job.preview_status == "generating":
-                    job.preview_status = "error"
-                    job.preview_error = f"{type(err).__name__}: {err}"
-            traceback.print_exc()
-        finally:
-            with self._lock:
-                if self._preview_active_job == job.job_id:
-                    self._preview_active_job = None
+    def _preview_worker_loop(self):
+        """Generate mask previews strictly one at a time, in FIFO order.
+        Queued jobs sit at a 0% ring until this loop reaches them."""
+        while True:
+            with self._cond:
+                while not self._preview_queue:
+                    self._cond.wait()
+                job_id = self._preview_queue.popleft()
+                job = self._by_id.get(job_id)
+                if (
+                    job is None
+                    or job.status != "done"
+                    or job.preview_status != "queued"
+                ):
+                    # job was removed (Clear all / Delete) while waiting
+                    continue
+                job.preview_status = "generating"
+                job.preview_progress = 0.0
+                self._preview_active_job = job.job_id
+            try:
+                self._generate_preview(job)
+                with self._lock:
+                    if job.preview_status == "generating":
+                        job.preview_status = "ready"
+                        job.preview_progress = 1.0
+            except Exception as err:  # noqa: BLE001
+                with self._lock:
+                    if job.preview_status == "generating":
+                        job.preview_status = "error"
+                        job.preview_error = f"{type(err).__name__}: {err}"
+                traceback.print_exc()
+            finally:
+                with self._lock:
+                    if self._preview_active_job == job.job_id:
+                        self._preview_active_job = None
 
     def _generate_preview(self, job):
         """Extract the job's tars, merge per-object masks into rgba pngs under
@@ -2353,6 +2389,12 @@ class SegmentationQueue:
             if job.status != "done":
                 raise ValueError(f"Only finished jobs can be deleted (job is {job.status})")
             removed = []
+            # drop a queued preview so the worker does not start it after the
+            # tars are gone
+            try:
+                self._preview_queue.remove(job_id)
+            except ValueError:
+                pass
             for path in list(job.saved_paths):
                 if osp.isfile(path):
                     os.remove(path)
@@ -3060,8 +3102,8 @@ class Handler(BaseHTTPRequestHandler):
             job = SEG_QUEUE.delete_job(body.get("job_id"))
             return self._send_json({"ok": True, "job": job})
         if route == "/api/seg/preview":
-            job = SEG_QUEUE.start_preview(body.get("job_id"))
-            return self._send_json({"ok": True, "job": job})
+            job, queued = SEG_QUEUE.start_preview(body.get("job_id"))
+            return self._send_json({"ok": True, "job": job, "queued": queued})
         if route == "/api/seg/accept":
             job = SEG_QUEUE.accept_job(body.get("job_id"))
             return self._send_json({"ok": True, "job": job})

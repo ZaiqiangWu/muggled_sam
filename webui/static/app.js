@@ -1217,19 +1217,23 @@ function fmtDuration(sec) {
   return `${s}s`;
 }
 
-// 追加要求2: the Preview button has 3 visual states:
-//   none -> "Preview" (starts generation)
+// 追加要求2: the Preview button has 4 visual states:
+//   none -> "Preview" (starts generation, or joins the queue)
+//   queued -> 0% ring (waiting for the preview slot; FIFO)
 //   generating -> circular progress ring + percent
 //   ready -> play icon (opens the video dialog)
 const RING_CIRC = 50.265; // 2 * PI * 8
 function segPreviewButtonHtml(job) {
   const id = escHtml(job.job_id);
   const st = job.preview_status || "none";
-  if (st === "generating") {
-    const p = Math.max(0, Math.min(1, job.preview_progress || 0));
+  if (st === "generating" || st === "queued") {
+    const p = st === "queued" ? 0 : Math.max(0, Math.min(1, job.preview_progress || 0));
     const off = (RING_CIRC * (1 - p)).toFixed(2);
+    const title = st === "queued"
+      ? "Waiting in the preview queue (one preview at a time)..."
+      : "Generating mask preview video...";
     return `<button class="seg-preview generating" data-id="${id}" disabled
-      title="Generating mask preview video...">
+      title="${title}">
       <svg class="seg-ring" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
         <circle class="seg-ring-bg" cx="10" cy="10" r="8"></circle>
         <circle class="seg-ring-fg" cx="10" cy="10" r="8"
@@ -1494,14 +1498,17 @@ async function onPreviewClick(jobId) {
   const job = segJobById(jobId);
   if (!job) return;
   if (job.preview_status === "generating") return; // ring is visible; wait
+  if (job.preview_status === "queued") return; // 0% ring: waiting for its turn
   if (job.preview_status === "ready") {
     openSegPreview(job);
     return;
   }
   // "none" (or retry after an error): start generation
   try {
-    await api("/api/seg/preview", { method: "POST", body: { job_id: jobId } });
-    toast("Generating mask preview video\u2026");
+    const res = await api("/api/seg/preview", { method: "POST", body: { job_id: jobId } });
+    toast(res.queued
+      ? "Preview queued - it starts when the other preview finishes"
+      : "Generating mask preview video\u2026");
     await pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
