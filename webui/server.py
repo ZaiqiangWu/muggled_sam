@@ -127,11 +127,9 @@ _UPLOAD_LOCK = threading.Lock()
 #   accepted frames       : <repo>/videos/<garment>/<video_stem>/*.png
 MASK_PNG_ROOT = osp.join(_REPO_ROOT, "generated_mask_videos")
 VIDEOS_DEST_ROOT = osp.join(_REPO_ROOT, "videos")
-# Context frames on each side of the repaired range included in the repair
-# preview clip (150 frames = 5 s at the fixed 30 fps preview rate). The
-# repair preview encodes only this clip, not the whole video, so repairing
-# a few frames on a long video stays fast.
-REPAIR_CLIP_PAD = 150
+# Repair previews contain exactly the requested A/B range.  Keeping this as
+# a named value makes the status metadata and encoder follow the same rule.
+REPAIR_CLIP_PAD = 0
 # Raw segmentation results (tars / ffmpeg mp4s) written by the queue
 SAVED_FRAMES_DIR = osp.join(_REPO_ROOT, "saved_images", "run_video")
 # Finished segmentation jobs are persisted here so the task list survives

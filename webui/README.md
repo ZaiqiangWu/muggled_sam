@@ -243,10 +243,9 @@ Each finished job card has three buttons on the bottom right:
   for the whole repair). Repaired frames are staged under
   `./generated_mask_videos/.repair_staging/<job_id>/clipNN/` and each clip is
   encoded into its own short preview
-  `./generated_mask_videos/<video_stem>_repaired_mask_cNN.mp4` — the clip's
-  range plus ~5 s / 150 frames of context on each side, clamped to the video,
-  so repair stays fast even on long videos; the untouched full video is the
-  normal mask preview.
+  `./generated_mask_videos/<video_stem>_repaired_mask_cNN.mp4` — exactly the
+  selected A/B frame range (no context frames); the untouched full video is
+  the normal mask preview.
   **The original result files are not touched until you decide**. After the
   tracking pass finishes, the button row shows **one `▶ <range>` button per
   clip**; pressing it plays that clip's preview in the same video dialog,
