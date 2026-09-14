@@ -625,7 +625,14 @@ input[type="range"] { width: 100%; }
 }
 
 /* 追加要求2: mask preview video dialog */
-.video-modal-card { width: min(92vw, 980px); }
+.video-modal-card {
+  width: min(92vw, 980px);
+  /* The repair controls must never be pushed below the viewport by a tall
+     preview.  Keep the entire card usable on short laptop displays. */
+  max-height: 94dvh;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
 .video-modal-head {
   display: flex;
   align-items: center;
@@ -650,7 +657,8 @@ input[type="range"] { width: 100%; }
 #seg-preview-video {
   display: block;
   width: 100%;
-  max-height: 72vh;
+  /* Reserve vertical space for the repair timeline, A/B controls and clips. */
+  max-height: clamp(160px, calc(84vh - 260px), 72vh);
   background: #000;
   border-radius: 6px;
 }
