@@ -1297,9 +1297,12 @@ function segRepairHtml(job) {
     const p = Math.max(0, Math.min(1, job.repair_progress || 0));
     const off = (RING_CIRC * (1 - p)).toFixed(2);
     const rangeText = fmtRepairFrames(job.repair_frames);
+    const phaseTitle = job.repair_phase
+      ? escHtml(job.repair_phase)
+      : "Applying the repair: the result tar(s) + preview frames are being rewritten...";
     return `
       <button class="seg-repair running" data-id="${id}" disabled
-        title="Applying the repair: the result tar(s) + preview frames are being rewritten...">
+        title="${phaseTitle}">
         <svg class="seg-ring" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
           <circle class="seg-ring-bg" cx="10" cy="10" r="8"></circle>
           <circle class="seg-ring-fg" cx="10" cy="10" r="8"
@@ -1797,6 +1800,9 @@ function openSegRepairPreview(jobId) {
   const job = findSegJob(jobId);
   if (!job || !job.repair_url) return;
   state.segRepairJobId = jobId;
+  const applying = job.repair_status === "accepting";
+  $("seg-repair-accept").style.display = applying ? "none" : "";
+  $("seg-repair-discard").style.display = applying ? "none" : "";
   const rangeText = fmtRepairFrames(job.repair_frames);
   const seedText = job.repair_direction === "backward"
     ? "next frame's mask, tracked backward"
@@ -1805,9 +1811,10 @@ function openSegRepairPreview(jobId) {
   if (Array.isArray(job.repair_clip) && job.repair_clip.length === 2) {
     clipText = ` Clip shows frames ${job.repair_clip[0]}-${job.repair_clip[1]}. `;
   }
-  $("seg-repair-hint").textContent =
-    `Frames ${rangeText} re-tracked from the ${seedText}.` + clipText +
-    "Accept rewrites the result tar(s) + preview frames; Discard keeps the original result.";
+  $("seg-repair-hint").textContent = applying
+    ? "The repair is being applied (the result files are being rewritten) - progress is shown on the job row."
+    : `Frames ${rangeText} re-tracked from the ${seedText}.` + clipText +
+      "Accept rewrites the result tar(s) + preview frames; Discard keeps the original result.";
   const video = $("seg-preview-video");
   $("seg-preview-title").textContent =
     `Repair preview \u00b7 ${job.label || job.job_id}`;
@@ -1820,6 +1827,11 @@ function openSegRepairPreview(jobId) {
 
 async function acceptSegRepair(jobId) {
   if (state.segRepairAccepting) return;
+  const job = findSegJob(jobId);
+  if (job && job.repair_status === "accepting") {
+    toast("The repair is already being applied - progress shows on the job row");
+    return;
+  }
   const ok = confirm(
     "Apply this frame repair? The result tar(s) and the generated preview " +
     "frames will be rewritten with the repaired frames."

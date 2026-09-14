@@ -247,9 +247,14 @@ Each finished job card has three buttons on the bottom right:
   staging; the job can afterwards be Accepted to `./videos/` as usual), and
   **Discard** (staging + repair mp4 are deleted, original results kept as-is).
   While applying, the button row is replaced by a progress ring
-  (`Applying N%`) and Accept / Discard are unavailable; if the apply step
-  fails, the pending repair is kept (with the error shown) so Accept can be
-  retried. A `pending: …` / `repaired: …` chip shows the affected frames.
+  (`Applying N%`) and Accept / Discard are unavailable; the ring's tooltip
+  shows the current stage — first the result tar(s) are rewritten (a full
+  copy of the multi-GB tar is needed, so this is the slow part on long
+  videos, ~0–50%), then the repaired frames are copied into the preview
+  frames (~55%), and finally the full preview mp4 is re-encoded (~55–95%),
+  with per-stage progress reported throughout. If the apply step fails, the
+  pending repair is kept (with the error shown) so Accept can be retried. A
+  `pending: …` / `repaired: …` chip shows the affected frames.
   Tracking-mode jobs only (not pure_text), and not available once the mask
   frames have been accepted.
 - **Accept** — moves the generated frames to `./videos/<garment>/<video_stem>/`

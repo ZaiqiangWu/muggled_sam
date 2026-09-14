@@ -1692,6 +1692,7 @@ class SegJob:
         self.repair_error = None
         self.repair_frames = []         # repaired frame indices (kept after accept)
         self.repair_direction = None    # "forward" | "backward"
+        self.repair_phase = None        # human-readable stage while accepting
 
     def request_cancel(self):
         self._cancel_requested = True
@@ -1829,6 +1830,7 @@ class SegJob:
             "preview_url": preview_url,
             "repair_status": repair_status,
             "repair_progress": round(self.repair_progress, 3),
+            "repair_phase": self.repair_phase,
             "repair_error": self.repair_error,
             "repair_frames": list(self.repair_frames),
             "repair_clip": repair_clip,
@@ -2556,6 +2558,7 @@ class SegmentationQueue:
             job.repair_error = None
             job.repair_frames = []
             job.repair_direction = None
+            job.repair_phase = None
             job.message = (
                 f"Deleted {len(removed)} result item(s); "
                 "accepted frames under videos/ were kept"
@@ -2607,8 +2610,13 @@ class SegmentationQueue:
 
     def _set_repair_progress(self, job, value):
         with self._lock:
-            if job.status == "done" and job.repair_status == "running":
+            if job.status == "done" and job.repair_status in ("running", "accepting"):
                 job.repair_progress = max(0.0, min(1.0, float(value)))
+
+    def _set_repair_phase(self, job, phase):
+        with self._lock:
+            if job.status == "done" and job.repair_status in ("running", "accepting"):
+                job.repair_phase = phase
 
     @staticmethod
     def _tar_obj_index(tar_path):
@@ -2674,9 +2682,11 @@ class SegmentationQueue:
         return img[..., 3] > 0
 
     @staticmethod
-    def _rewrite_tar_repaired_frames(tar_path, obj_staging_dir, frames):
+    def _rewrite_tar_repaired_frames(tar_path, obj_staging_dir, frames, progress=None):
         """Rebuild a result tar, replacing the given frame indices with the
-        repaired pngs from obj_staging_dir (all other members copy through)."""
+        repaired pngs from obj_staging_dir (all other members copy through).
+        The tar can be many GB, so report per-member copy progress when a
+        callback is given (it is called with a fraction 0..1)."""
         replacements = {}
         for frame_idx in frames:
             src = osp.join(obj_staging_dir, f"{frame_idx:08d}.png")
@@ -2688,7 +2698,9 @@ class SegmentationQueue:
         tmp_path = tar_path + ".repair.tmp"
         with tarfile.open(tar_path, "r") as src_tar, \
                 tarfile.open(tmp_path, "w") as dst_tar:
-            for member in src_tar.getmembers():
+            members = src_tar.getmembers()
+            total = len(members) or 1
+            for i, member in enumerate(members):
                 if member.name in replacements:
                     data = replacements[member.name]
                     new_info = tarfile.TarInfo(name=member.name)
@@ -2704,6 +2716,8 @@ class SegmentationQueue:
                         dst_tar.addfile(member)
                 else:
                     dst_tar.addfile(member)
+                if progress is not None:
+                    progress((i + 1) / total)
         os.replace(tmp_path, tar_path)
 
     def start_repair(self, job_id, frames_raw, direction):
@@ -2771,6 +2785,7 @@ class SegmentationQueue:
             job.repair_status = "running"
             job.repair_progress = 0.0
             job.repair_error = None
+            job.repair_phase = None
             job.repair_direction = direction
             job.repair_frames = frames
         threading.Thread(
@@ -2995,11 +3010,22 @@ class SegmentationQueue:
         held while this runs (it can take a while for long videos)."""
         staging = job.repair_staging_dir()
         tar_by_obj = self._map_tar_to_objects(job, objects)
+        self._set_repair_phase(
+            job,
+            "Rewriting the result tar - a full copy is needed to replace the "
+            "repaired frames, only those change",
+        )
         for i, objidx in enumerate(objects):
             self._rewrite_tar_repaired_frames(
-                tar_by_obj[objidx], osp.join(staging, f"obj{objidx:02d}"), frames
+                tar_by_obj[objidx], osp.join(staging, f"obj{objidx:02d}"), frames,
+                progress=lambda p, i=i: self._set_repair_progress(
+                    job, 0.50 * (i + p) / len(objects)
+                ),
             )
-            self._set_repair_progress(job, 0.05 * (i + 1) / len(objects))
+            self._set_repair_progress(job, 0.50 * (i + 1) / len(objects))
+        self._set_repair_phase(
+            job, "Copying the repaired frames into the preview frames"
+        )
         png_dir = job.preview_png_dir()
         os.makedirs(png_dir, exist_ok=True)
         merged_dir = osp.join(staging, "merged")
@@ -3007,15 +3033,18 @@ class SegmentationQueue:
             src = osp.join(merged_dir, f"{frame_idx:08d}.png")
             if osp.isfile(src):
                 shutil.copyfile(src, osp.join(png_dir, f"{frame_idx:08d}.png"))
-        self._set_repair_progress(job, 0.10)
+        self._set_repair_progress(job, 0.55)
         frame_paths = sorted(
             osp.join(png_dir, n) for n in os.listdir(png_dir)
             if n.lower().endswith(".png")
         )
         if frame_paths:
+            self._set_repair_phase(
+                job, "Re-encoding the full preview video (white background)"
+            )
             self._encode_preview_video(
                 job, frame_paths, job.preview_mp4_path(),
-                progress=lambda p: self._set_repair_progress(job, 0.10 + 0.85 * p),
+                progress=lambda p: self._set_repair_progress(job, 0.55 + 0.40 * p),
             )
         shutil.rmtree(staging, ignore_errors=True)
         repair_mp4 = job.repair_mp4_path()
@@ -3028,6 +3057,7 @@ class SegmentationQueue:
             job.repair_status = "accepted"
             job.repair_progress = 1.0
             job.repair_error = None
+            job.repair_phase = None
             job.repair_direction = direction
             job.repair_frames = list(frames)
             job.preview_status = "ready"
@@ -3066,6 +3096,7 @@ class SegmentationQueue:
             job.repair_status = "accepting"
             job.repair_progress = 0.0
             job.repair_error = None
+            job.repair_phase = None
         threading.Thread(
             target=self._run_accept_repair,
             args=(job, frames, objects, direction),
@@ -3086,6 +3117,7 @@ class SegmentationQueue:
                 job.repair_error = f"{type(err).__name__}: {err}"
                 # keep the pending repair retryable while its staging data
                 # is still on disk; otherwise mark the repair failed
+                job.repair_phase = None
                 if osp.isfile(osp.join(job.repair_staging_dir(), "meta.json")):
                     job.repair_status = "ready"
                     job.repair_progress = 1.0
@@ -3116,6 +3148,7 @@ class SegmentationQueue:
             job.repair_error = None
             job.repair_frames = []
             job.repair_direction = None
+            job.repair_phase = None
         return job.to_dict()
 
     # ------------------------------------------------------------- worker
