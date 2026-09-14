@@ -1803,6 +1803,8 @@ function openSegRepairPreview(jobId) {
   const applying = job.repair_status === "accepting";
   $("seg-repair-accept").style.display = applying ? "none" : "";
   $("seg-repair-discard").style.display = applying ? "none" : "";
+  $("seg-repair-rewrite-tar").checked = false;
+  $("seg-repair-tar-opt").style.display = applying ? "none" : "";
   const rangeText = fmtRepairFrames(job.repair_frames);
   const seedText = job.repair_direction === "backward"
     ? "next frame's mask, tracked backward"
@@ -1825,7 +1827,7 @@ function openSegRepairPreview(jobId) {
   video.play().catch(() => { /* user can press play manually */ });
 }
 
-async function acceptSegRepair(jobId) {
+async function acceptSegRepair(jobId, rewriteTar = false) {
   if (state.segRepairAccepting) return;
   const job = findSegJob(jobId);
   if (job && job.repair_status === "accepting") {
@@ -1833,18 +1835,21 @@ async function acceptSegRepair(jobId) {
     return;
   }
   const ok = confirm(
-    "Apply this frame repair? The result tar(s) and the generated preview " +
-    "frames will be rewritten with the repaired frames."
+    "Apply this frame repair? The generated preview frames + preview mp4 " +
+    "will be rewritten with the repaired frames." +
+    (rewriteTar
+      ? " The result tar(s) will be fully re-copied too (slow)."
+      : " The result tar(s) are left unchanged (faster).")
   );
   if (!ok) return;
   state.segRepairAccepting = true;
   try {
     const res = await api("/api/seg/repair/accept", {
       method: "POST",
-      body: { job_id: jobId },
+      body: { job_id: jobId, rewrite_tar: !!rewriteTar },
     });
     closeSegPreview();
-    toast("Repair accepted - applying\u2026 (result files will be rewritten)");
+    toast("Repair accepted - applying\u2026");
     pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
@@ -2196,7 +2201,8 @@ function wireSeg() {
     if (state.segRepairJobId) discardSegRepair(state.segRepairJobId);
   };
   $("seg-repair-accept").onclick = () => {
-    if (state.segRepairJobId) acceptSegRepair(state.segRepairJobId);
+    if (state.segRepairJobId)
+      acceptSegRepair(state.segRepairJobId, $("seg-repair-rewrite-tar").checked);
   };
   $("seg-preview-video").addEventListener("timeupdate", () => {
     if (state.segRepairPick)

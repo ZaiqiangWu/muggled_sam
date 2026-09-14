@@ -241,19 +241,23 @@ Each finished job card has three buttons on the bottom right:
   row then shows
   `▶ Repair` (play the repair preview in the same video dialog, which gains
   **Accept repair** / **Discard** buttons in the footer),
-  **Accept repair** (applies the repair in the background — rewriting the
-  result tar(s) — replacing only the repaired frames — overwriting the
-  generated preview frames, re-encoding the preview mp4, and deleting the
-  staging; the job can afterwards be Accepted to `./videos/` as usual), and
+  **Accept repair** (applies the repair in the background — overwriting the
+  generated preview frames and re-encoding the preview mp4; the job can
+  afterwards be Accepted to `./videos/` as usual), and
   **Discard** (staging + repair mp4 are deleted, original results kept as-is).
-  While applying, the button row is replaced by a progress ring
-  (`Applying N%`) and Accept / Discard are unavailable; the ring's tooltip
-  shows the current stage — first the result tar(s) are rewritten (a full
-  copy of the multi-GB tar is needed, so this is the slow part on long
-  videos, ~0–50%), then the repaired frames are copied into the preview
-  frames (~55%), and finally the full preview mp4 is re-encoded (~55–95%),
-  with per-stage progress reported throughout. If the apply step fails, the
-  pending repair is kept (with the error shown) so Accept can be retried. A
+  By default the **result tar(s) are left unchanged** (skipping the slow
+  multi-GB copy); the footer's "Also update result tar (slow)" checkbox makes
+  the apply step re-copy the tar(s) so they contain the repaired frames too
+  (the job-row Accept repair always takes the fast path). When the tar is
+  skipped, the repaired frames are kept as per-job overrides and re-applied
+  whenever the preview is regenerated from the tar(s), so the preview never
+  regresses to the flawed frames. While applying, the button row is replaced
+  by a progress ring (`Applying N%`) and Accept / Discard are unavailable;
+  the ring's tooltip shows the current stage — the repaired frames are copied
+  into the preview frames, then the full preview mp4 is re-encoded (plus the
+  tar re-copy first, ~0–50%, when the checkbox is on), with per-stage
+  progress reported throughout. If the apply step fails, the pending repair
+  is kept (with the error shown) so Accept can be retried. A
   `pending: …` / `repaired: …` chip shows the affected frames.
   Tracking-mode jobs only (not pure_text), and not available once the mask
   frames have been accepted.

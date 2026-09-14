@@ -1726,6 +1726,12 @@ class SegJob:
         """Preview video for the pending repair (originals left untouched)."""
         return osp.join(MASK_PNG_ROOT, self.mask_name() + "_repaired_mask.mp4")
 
+    def repair_overrides_dir(self):
+        """Accepted repaired preview frames, kept so that a later Preview
+        regeneration (which re-extracts the result tars, possibly stale
+        because a repair skipped the tar rewrite) re-applies the repairs."""
+        return osp.join(MASK_PNG_ROOT, ".repair_overrides", self.job_id)
+
     def _repair_load_meta(self):
         """Fill repair_frames / repair_direction from the staging metadata
         (e.g. after a server restart, when the in-memory state is lost)."""
@@ -2435,6 +2441,16 @@ class SegmentationQueue:
         finally:
             shutil.rmtree(tmp_root, ignore_errors=True)
 
+        # re-apply accepted frame repairs: the result tars may be stale when
+        # a repair was accepted without rewriting them
+        overrides_dir = job.repair_overrides_dir()
+        if osp.isdir(overrides_dir):
+            for name in os.listdir(overrides_dir):
+                if name.lower().endswith(".png"):
+                    shutil.copyfile(
+                        osp.join(overrides_dir, name), osp.join(png_dir, name)
+                    )
+
         frame_paths = sorted(
             osp.join(png_dir, n) for n in os.listdir(png_dir)
             if n.lower().endswith(".png")
@@ -2549,6 +2565,10 @@ class SegmentationQueue:
             if osp.isfile(repair_mp4):
                 os.remove(repair_mp4)
                 removed.append(repair_mp4)
+            overrides_dir = job.repair_overrides_dir()
+            if osp.isdir(overrides_dir):
+                shutil.rmtree(overrides_dir, ignore_errors=True)
+                removed.append(overrides_dir)
             job.accepted = osp.isdir(job.accept_dest_dir())
             job.preview_status = "none"
             job.preview_progress = 0.0
@@ -3003,37 +3023,64 @@ class SegmentationQueue:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _apply_repair(self, job, frames, objects, direction):
-        """File work for accepting a repair: rewrite the result tars
-        (replacing only the repaired frames), overwrite the preview pngs,
-        re-encode the preview mp4, delete the staging. The queue lock is NOT
-        held while this runs (it can take a while for long videos)."""
+    def _apply_repair(self, job, frames, objects, direction, rewrite_tar=False):
+        """File work for accepting a repair: overwrite the preview pngs,
+        re-encode the preview mp4, delete the staging. The result tars are
+        only re-copied when rewrite_tar is True (a full multi-GB copy);
+        otherwise the repaired frames are kept as overrides that preview
+        regeneration re-applies. The queue lock is NOT held while this runs
+        (it can take a while for long videos)."""
         staging = job.repair_staging_dir()
-        tar_by_obj = self._map_tar_to_objects(job, objects)
-        self._set_repair_phase(
-            job,
-            "Rewriting the result tar - a full copy is needed to replace the "
-            "repaired frames, only those change",
-        )
-        for i, objidx in enumerate(objects):
-            self._rewrite_tar_repaired_frames(
-                tar_by_obj[objidx], osp.join(staging, f"obj{objidx:02d}"), frames,
-                progress=lambda p, i=i: self._set_repair_progress(
-                    job, 0.50 * (i + p) / len(objects)
-                ),
+        merged_dir = osp.join(staging, "merged")
+        if rewrite_tar:
+            tar_by_obj = self._map_tar_to_objects(job, objects)
+            self._set_repair_phase(
+                job,
+                "Rewriting the result tar - a full copy is needed to replace "
+                "the repaired frames, only those change",
             )
-            self._set_repair_progress(job, 0.50 * (i + 1) / len(objects))
+            for i, objidx in enumerate(objects):
+                self._rewrite_tar_repaired_frames(
+                    tar_by_obj[objidx], osp.join(staging, f"obj{objidx:02d}"),
+                    frames,
+                    progress=lambda p, i=i: self._set_repair_progress(
+                        job, 0.50 * (i + p) / len(objects)
+                    ),
+                )
+                self._set_repair_progress(job, 0.50 * (i + 1) / len(objects))
+            # the tar now holds the newer frames: drop any stale overrides
+            # for them (a previous repair may have been accepted without a
+            # tar rewrite)
+            overrides_dir = job.repair_overrides_dir()
+            for frame_idx in frames:
+                stale = osp.join(overrides_dir, f"{frame_idx:08d}.png")
+                if osp.isfile(stale):
+                    os.remove(stale)
+            copy_start, encode_range = 0.55, 0.40
+        else:
+            self._set_repair_progress(job, 0.05)
+            copy_start, encode_range = 0.10, 0.85
         self._set_repair_phase(
             job, "Copying the repaired frames into the preview frames"
         )
         png_dir = job.preview_png_dir()
         os.makedirs(png_dir, exist_ok=True)
-        merged_dir = osp.join(staging, "merged")
         for frame_idx in frames:
             src = osp.join(merged_dir, f"{frame_idx:08d}.png")
             if osp.isfile(src):
                 shutil.copyfile(src, osp.join(png_dir, f"{frame_idx:08d}.png"))
-        self._set_repair_progress(job, 0.55)
+        if not rewrite_tar:
+            # keep the repaired frames so a later Preview regeneration from
+            # the (stale) result tars re-applies this repair
+            overrides_dir = job.repair_overrides_dir()
+            os.makedirs(overrides_dir, exist_ok=True)
+            for frame_idx in frames:
+                src = osp.join(merged_dir, f"{frame_idx:08d}.png")
+                if osp.isfile(src):
+                    shutil.copyfile(
+                        src, osp.join(overrides_dir, f"{frame_idx:08d}.png")
+                    )
+        self._set_repair_progress(job, copy_start)
         frame_paths = sorted(
             osp.join(png_dir, n) for n in os.listdir(png_dir)
             if n.lower().endswith(".png")
@@ -3044,7 +3091,9 @@ class SegmentationQueue:
             )
             self._encode_preview_video(
                 job, frame_paths, job.preview_mp4_path(),
-                progress=lambda p: self._set_repair_progress(job, 0.55 + 0.40 * p),
+                progress=lambda p: self._set_repair_progress(
+                    job, copy_start + encode_range * p
+                ),
             )
         shutil.rmtree(staging, ignore_errors=True)
         repair_mp4 = job.repair_mp4_path()
@@ -3064,14 +3113,20 @@ class SegmentationQueue:
             job.preview_progress = 1.0
             job.preview_error = None
             job.message = (
-                f"Repair accepted: {len(frames)} frame(s) rewritten in the result "
-                f"tar(s) + preview frames"
+                f"Repair accepted: {len(frames)} frame(s) rewritten in the "
+                f"result tar(s) + preview frames"
+                if rewrite_tar else
+                f"Repair accepted: {len(frames)} frame(s) applied to the "
+                f"preview frames (result tar left unchanged)"
             )
 
-    def accept_repair(self, job_id):
+    def accept_repair(self, job_id, rewrite_tar=False):
         """Apply a pending frame repair in the background (see
-        _apply_repair). Returns the job dict immediately; progress is
-        reported via repair_status="accepting" + repair_progress."""
+        _apply_repair). rewrite_tar=False (default) skips the slow full
+        re-copy of the result tar(s) and only updates the preview frames +
+        mp4; the repaired frames are kept as overrides that preview
+        regeneration re-applies. Returns the job dict immediately; progress
+        is reported via repair_status="accepting" + repair_progress."""
         with self._lock:
             job = self._by_id.get(job_id)
             if job is None:
@@ -3099,18 +3154,18 @@ class SegmentationQueue:
             job.repair_phase = None
         threading.Thread(
             target=self._run_accept_repair,
-            args=(job, frames, objects, direction),
+            args=(job, frames, objects, direction, bool(rewrite_tar)),
             name=f"seg-repair-accept-{job.job_id}",
             daemon=True,
         ).start()
         return job.to_dict()
 
-    def _run_accept_repair(self, job, frames, objects, direction):
+    def _run_accept_repair(self, job, frames, objects, direction, rewrite_tar):
         """Background worker for accept_repair. Re-encoding the preview mp4
         can take a while on long videos, so the HTTP request returns right
         away and the UI tracks progress via the job snapshot."""
         try:
-            self._apply_repair(job, frames, objects, direction)
+            self._apply_repair(job, frames, objects, direction, rewrite_tar)
         except Exception as err:  # noqa: BLE001
             traceback.print_exc()
             with self._lock:
@@ -3925,7 +3980,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._send_json({"ok": True, "job": job})
         if route == "/api/seg/repair/accept":
-            job = SEG_QUEUE.accept_repair(body.get("job_id"))
+            job = SEG_QUEUE.accept_repair(
+                body.get("job_id"), bool(body.get("rewrite_tar", False))
+            )
             return self._send_json({"ok": True, "job": job})
         if route == "/api/seg/repair/discard":
             job = SEG_QUEUE.discard_repair(body.get("job_id"))

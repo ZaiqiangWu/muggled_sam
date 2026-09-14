@@ -395,6 +395,10 @@
       <div class="video-modal-foot" id="seg-repair-actions" style="display:none">
         <span class="hint" id="seg-repair-hint"></span>
         <span class="spacer"></span>
+        <label class="hint" id="seg-repair-tar-opt"
+          title="Off (default): only the preview frames + preview mp4 are updated - fast, the result tar(s) keep the original flawed frames. On: the multi-GB result tar(s) are fully re-copied so they contain the repaired frames too - slow on long videos.">
+          <input type="checkbox" id="seg-repair-rewrite-tar"> Also update result tar (slow)
+        </label>
         <button id="seg-repair-discard" class="danger">Discard</button>
         <button id="seg-repair-accept" class="primary">Accept repair</button>
       </div>
