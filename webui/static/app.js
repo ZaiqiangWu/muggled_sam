@@ -1750,6 +1750,9 @@ function setSegRepairFrame(frame, { pause = true } = {}) {
   const safeFrame = Math.max(0, Math.min(Math.round(frame), total - 1));
   const video = $("seg-preview-video");
   if (pause) video.pause();
+  // Assign on every range `input` event.  Do not wait for `change` (which
+  // only fires after the thumb is released): browsers then decode and paint
+  // the target frame continuously while the user drags.
   video.currentTime = safeFrame / 30;
   $("seg-repair-scrubber").value = String(safeFrame);
   $("seg-repair-cursor").textContent = "frame " + safeFrame;
@@ -2381,10 +2384,13 @@ function wireSeg() {
   $("seg-repair-scrubber").oninput = () => {
     // Scrubbing is intentionally a pause: it gives A/B placement a stable
     // frame, and selecting a marked clip is the explicit way to start a loop.
+    // setSegRepairFrame seeks on `input`, not `change`, so the displayed
+    // video follows the thumb.  Do not re-render the timeline here: before
+    // the asynchronous video seek completes that would reset the thumb to
+    // the previous frame and make the preview appear frozen.
     state.segRepairSelectedClipIdx = null;
     setSegRepairFrame(+$('seg-repair-scrubber').value);
     renderSegRepairClips();
-    renderSegRepairTimeline();
   };
   $("seg-repair-clip-sel").onchange = () => {
     if (state.segRepairJobId)
@@ -2420,6 +2426,18 @@ function wireSeg() {
     }
     $("seg-repair-cursor").textContent = "frame " + frame;
     $("seg-repair-scrubber").value = String(frame);
+    const job = findSegJob(pick.jobId);
+    const total = job && job.total_frames > 0 ? job.total_frames : 0;
+    $("seg-repair-timeline-label").textContent = total ? `frame ${frame} / ${total - 1}` : `frame ${frame}`;
+  });
+  $("seg-preview-video").addEventListener("seeked", () => {
+    // `timeupdate` is deliberately throttled by browsers during seeks.
+    // Update the picker as soon as the decoded frame is ready instead.
+    const pick = state.segRepairPick;
+    if (!pick) return;
+    const frame = segRepairCursorFrame();
+    $("seg-repair-scrubber").value = String(frame);
+    $("seg-repair-cursor").textContent = "frame " + frame;
     const job = findSegJob(pick.jobId);
     const total = job && job.total_frames > 0 ? job.total_frames : 0;
     $("seg-repair-timeline-label").textContent = total ? `frame ${frame} / ${total - 1}` : `frame ${frame}`;
