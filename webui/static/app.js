@@ -49,6 +49,10 @@ const state = {
   // committed clips set on the preview bar
   segRepairPick: null,
   segRepairSelectedClipIdx: null, // committed clip selected for timeline looping
+  // currentTime changes asynchronously.  Keep the requested frame separately
+  // so held ArrowRight advances from the last request, not a stale decoded frame.
+  segRepairTargetFrame: null,
+  segRepairSeeking: false,
   segRepairClipIdx: null,  // clip index shown in the repair preview dialog
   segRepairAccepting: false, // accept request in flight (client-side guard)
 };
@@ -1666,6 +1670,8 @@ function closeSegPreview() {
   $("seg-preview-dialog").style.display = "none";
   state.segRepairPick = null;
   state.segRepairSelectedClipIdx = null;
+  state.segRepairTargetFrame = null;
+  state.segRepairSeeking = false;
   state.segRepairClipIdx = null;
 }
 
@@ -1719,6 +1725,8 @@ function openSegRepairPicker(jobId) {
   state.segRepairClipIdx = null;
   state.segRepairPick = { jobId, a: null, b: null, clips: [] };
   state.segRepairSelectedClipIdx = null;
+  state.segRepairTargetFrame = 0;
+  state.segRepairSeeking = false;
   const video = $("seg-preview-video");
   $("seg-preview-title").textContent =
     `Repair range \u00b7 ${job.label || job.job_id}`;
@@ -1753,6 +1761,8 @@ function setSegRepairFrame(frame, { pause = true } = {}) {
   // Assign on every range `input` event.  Do not wait for `change` (which
   // only fires after the thumb is released): browsers then decode and paint
   // the target frame continuously while the user drags.
+  state.segRepairTargetFrame = safeFrame;
+  state.segRepairSeeking = true;
   video.currentTime = safeFrame / 30;
   $("seg-repair-scrubber").value = String(safeFrame);
   $("seg-repair-cursor").textContent = "frame " + safeFrame;
@@ -2420,10 +2430,13 @@ function wireSeg() {
     const selected = pick.clips[state.segRepairSelectedClipIdx];
     // A selected A/B range loops without changing the native video's source.
     if (selected && frame >= selected.e) {
+      state.segRepairTargetFrame = selected.s;
+      state.segRepairSeeking = true;
       $("seg-preview-video").currentTime = selected.s / 30;
       $("seg-preview-video").play().catch(() => {});
       return;
     }
+    if (!state.segRepairSeeking) state.segRepairTargetFrame = frame;
     $("seg-repair-cursor").textContent = "frame " + frame;
     $("seg-repair-scrubber").value = String(frame);
     const job = findSegJob(pick.jobId);
@@ -2436,6 +2449,8 @@ function wireSeg() {
     const pick = state.segRepairPick;
     if (!pick) return;
     const frame = segRepairCursorFrame();
+    state.segRepairTargetFrame = frame;
+    state.segRepairSeeking = false;
     $("seg-repair-scrubber").value = String(frame);
     $("seg-repair-cursor").textContent = "frame " + frame;
     const job = findSegJob(pick.jobId);
@@ -2455,7 +2470,13 @@ function wireSeg() {
     if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
       evt.preventDefault();
       state.segRepairSelectedClipIdx = null;
-      setSegRepairFrame(segRepairCursorFrame() + (evt.key === "ArrowRight" ? 1 : -1));
+      const video = $("seg-preview-video");
+      const baseFrame = !video.paused
+        ? segRepairCursorFrame()
+        : Number.isInteger(state.segRepairTargetFrame)
+        ? state.segRepairTargetFrame
+        : segRepairCursorFrame();
+      setSegRepairFrame(baseFrame + (evt.key === "ArrowRight" ? 1 : -1));
       renderSegRepairClips();
       renderSegRepairTimeline();
       return;
