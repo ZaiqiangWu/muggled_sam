@@ -612,6 +612,12 @@ input[type="range"] { width: 100%; }
   background: color-mix(in srgb, var(--accent2) 52%, transparent);
   z-index: 1;
 }
+.seg-repair-marker.draft {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 58%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
 
 /* circular progress ring inside the Preview button */
 .seg-ring { display: block; transform: rotate(-90deg); }

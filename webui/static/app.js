@@ -1803,10 +1803,15 @@ function renderSegRepairTimeline() {
     ? state.segRepairTargetFrame
     : segRepairCursorFrame();
   scrubber.value = String(displayFrame);
-  markers.innerHTML = pick.clips.map((clip, index) => {
+  const span = Math.max(total - 1, 1);
+  const draftMarker = pick.a == null ? "" : (() => {
+    const left = (pick.a / span) * 100;
+    return `<span class="seg-repair-marker draft" style="left:${left}%"
+      title="A: frame ${pick.a}" aria-label="A: frame ${pick.a}"></span>`;
+  })();
+  markers.innerHTML = draftMarker + pick.clips.map((clip, index) => {
     // Positions are expressed against the first/last frame endpoints so a
     // clip touching the last frame still ends inside the displayed track.
-    const span = Math.max(total - 1, 1);
     const left = (clip.s / span) * 100;
     const width = Math.min(Math.max(((clip.e - clip.s + 1) / total) * 100, 0.6), 100 - left);
     const selected = index === state.segRepairSelectedClipIdx ? " selected" : "";
@@ -1825,12 +1830,14 @@ function renderSegRepairTimeline() {
 function setSegRepairPoint(which) {
   const pick = state.segRepairPick;
   if (!pick) return;
-  // Prefer the explicit target after keyboard/scrubber movement so A/B uses
-  // exactly the frame the user selected even if the decoder is finishing a
-  // previous asynchronous seek.
-  pick[which] = Number.isInteger(state.segRepairTargetFrame)
-    ? state.segRepairTargetFrame
-    : segRepairCursorFrame();
+  // Read the visible preview frame. This also respects seeking performed with
+  // the native video controls, which has no client-side target-frame update.
+  const selectedFrame = segRepairCursorFrame();
+  pick[which] = selectedFrame;
+  state.segRepairTargetFrame = selectedFrame;
+  // A committed clip only loops after the user explicitly clicks its chip or
+  // timeline marker. Setting a new A/B range must not start a loop.
+  if (which === "a") state.segRepairSelectedClipIdx = null;
   if (pick.a != null && pick.b != null) commitDraftClip();
   renderSegRepairClips();
   updateSegRepairPickUi();
@@ -1855,7 +1862,9 @@ function commitDraftClip() {
   let direction = "forward";
   if (total > 0 && s === 0) direction = "backward";
   pick.clips.push({ s, e, direction });
-  state.segRepairSelectedClipIdx = pick.clips.length - 1;
+  // Do not select the new clip automatically: after Set B, Space should play
+  // forward from B, not loop back to A.
+  state.segRepairSelectedClipIdx = null;
 }
 
 // Render the committed-clip chips (each with a direction select + remove).
@@ -2486,7 +2495,15 @@ function wireSeg() {
     if (evt.key === " ") {
       evt.preventDefault();
       const video = $("seg-preview-video");
-      if (video.paused) video.play().catch(() => {});
+      if (video.paused) {
+        // Resume from the explicitly selected B/current frame. A clip only
+        // loops when it was explicitly selected by clicking its chip/marker.
+        if (state.segRepairSelectedClipIdx == null &&
+            Number.isInteger(state.segRepairTargetFrame)) {
+          video.currentTime = (state.segRepairTargetFrame + 0.5) / 30;
+        }
+        video.play().catch(() => {});
+      }
       else video.pause();
       return;
     }
