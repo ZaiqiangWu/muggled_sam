@@ -368,6 +368,36 @@
     <div class="loading-card"><div class="spinner"></div><div id="loading-text">Loading...</div></div>
   </div>
 
+  <!-- Frame repair dialog (segmentation tab): flawed frame range + seed
+       direction; the repaired frames are staged and previewed before accept
+       (rewrites the result tars + preview frames) or discard -->
+  <div id="seg-repair-dialog" class="modal" style="display:none">
+    <div class="modal-card">
+      <h2 id="seg-repair-title">Repair flawed frames</h2>
+      <div class="hint">
+        Seeds a fresh tracking run from the previous or next frame's saved
+        mask and re-tracks the frame range. All result files stay untouched
+        until you <b>accept</b> the previewed repair. Frame indices are 0-based
+        (same as the generated frame names; the video has
+        <span id="seg-repair-total"></span> frames).
+      </div>
+      <div class="seg-field">
+        <span class="seg-label">Frame number / range (e.g. 123 or 130-132)</span>
+        <input type="text" id="seg-repair-frames" placeholder="e.g. 123 or 130-132">
+      </div>
+      <div class="seg-field">
+        <span class="seg-label">Repair direction</span>
+        <label class="hint"><input type="radio" name="seg-repair-dir" value="forward" checked> Previous frame's mask as seed, track forward</label>
+        <label class="hint"><input type="radio" name="seg-repair-dir" value="backward"> Next frame's mask as seed, track backward</label>
+      </div>
+      <div class="row modal-actions">
+        <span class="spacer"></span>
+        <button id="seg-repair-cancel">Cancel</button>
+        <button id="seg-repair-ok" class="primary">Start repair</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Mask preview video dialog (segmentation tab): native controls give a
        seekable progress bar; the X closes the window, playback ending just
        stops the video (the window stays open) -->
@@ -379,6 +409,12 @@
           aria-label="Close">&times;</button>
       </div>
       <video id="seg-preview-video" controls preload="metadata"></video>
+      <div class="video-modal-foot" id="seg-repair-actions" style="display:none">
+        <span class="hint" id="seg-repair-hint"></span>
+        <span class="spacer"></span>
+        <button id="seg-repair-discard" class="danger">Discard</button>
+        <button id="seg-repair-accept" class="primary">Accept repair</button>
+      </div>
     </div>
   </div>
 

@@ -37,9 +37,11 @@ results match the originals.
 
 import argparse
 import base64
+import io
 import json
 import os
 import os.path as osp
+import re
 import sys
 import shutil
 import tarfile
@@ -62,7 +64,10 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from muggled_sam.make_sam import make_sam_from_state_dict  # noqa: E402
-from muggled_sam.demo_helpers.ui.video import ReversibleLoopingVideoReader  # noqa: E402
+from muggled_sam.demo_helpers.ui.video import (  # noqa: E402
+    ReversibleLoopingVideoReader,
+    create_VideoCapture,
+)
 from muggled_sam.demo_helpers.ui.helpers.images import (  # noqa: E402
     FrameCompositing,
     CheckerPattern,
@@ -1672,6 +1677,16 @@ class SegJob:
         self.preview_progress = 0.0      # 0..1 while generating
         self.preview_error = None
         self.accepted = False
+        # Frame repair state (finished jobs only): re-track a flawed frame
+        # range seeded from an adjacent frame's mask. Repaired frames are
+        # staged (under .repair_staging/<job_id>/) and encoded into a
+        # separate preview mp4; the original files are only rewritten on
+        # accept.
+        self.repair_status = "none"     # none | running | ready | error | accepted
+        self.repair_progress = 0.0      # 0..1 while repairing
+        self.repair_error = None
+        self.repair_frames = []         # repaired frame indices (kept after accept)
+        self.repair_direction = None    # "forward" | "backward"
 
     def request_cancel(self):
         self._cancel_requested = True
@@ -1696,6 +1711,30 @@ class SegJob:
         """Where Accept moves the frames: ./videos/<garment>/<mask_name>/."""
         garment_name = "_".join(self.mask_name().split("_")[:-1])
         return osp.join(VIDEOS_DEST_ROOT, garment_name, self.mask_name())
+
+    def repair_staging_dir(self):
+        """Staging area for a pending frame repair (per-object + merged frames)."""
+        return osp.join(MASK_PNG_ROOT, ".repair_staging", self.job_id)
+
+    def repair_mp4_path(self):
+        """Preview video for the pending repair (originals left untouched)."""
+        return osp.join(MASK_PNG_ROOT, self.mask_name() + "_repaired_mask.mp4")
+
+    def _repair_load_meta(self):
+        """Fill repair_frames / repair_direction from the staging metadata
+        (e.g. after a server restart, when the in-memory state is lost)."""
+        if self.repair_frames:
+            return
+        meta_path = osp.join(self.repair_staging_dir(), "meta.json")
+        if not osp.isfile(meta_path):
+            return
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh)
+            self.repair_frames = [int(f) for f in meta.get("frames", [])]
+            self.repair_direction = str(meta.get("direction") or "forward")
+        except Exception:  # noqa: BLE001
+            pass
 
     def tar_result_paths(self):
         """This job's saved tarfile results (the inputs for Preview/Delete)."""
@@ -1727,6 +1766,8 @@ class SegJob:
         accepted = False
         preview_status = self.preview_status
         preview_url = None
+        repair_status = self.repair_status
+        repair_url = None
         if self.status == "done":
             has_tars = any(osp.isfile(p) for p in self.tar_result_paths())
             accepted = osp.isdir(self.accept_dest_dir())
@@ -1738,6 +1779,14 @@ class SegJob:
                     preview_url = f"/api/seg/preview_video?job_id={self.job_id}"
                 elif preview_status != "error":
                     preview_status = "none"
+            # Same for frame repairs: a leftover repair mp4 means a pending
+            # (ready) repair, e.g. after a server restart.
+            if repair_status not in ("running", "error", "accepted"):
+                if osp.isfile(self.repair_mp4_path()):
+                    repair_status = "ready"
+                    self._repair_load_meta()
+            if osp.isfile(self.repair_mp4_path()):
+                repair_url = f"/api/seg/repair_video?job_id={self.job_id}"
         return {
             "job_id": self.job_id,
             "kind": self.kind,
@@ -1766,6 +1815,12 @@ class SegJob:
             "preview_progress": round(self.preview_progress, 3),
             "preview_error": self.preview_error,
             "preview_url": preview_url,
+            "repair_status": repair_status,
+            "repair_progress": round(self.repair_progress, 3),
+            "repair_error": self.repair_error,
+            "repair_frames": list(self.repair_frames),
+            "repair_direction": self.repair_direction,
+            "repair_url": repair_url,
         }
 
     def to_storage(self):
@@ -1811,10 +1866,12 @@ class SegmentationQueue:
         self._preview_queue = deque()
         self._preview_worker_thread = None
         self._preview_active_job = None
-        # cached model
+        # cached model (model access is serialized with _model_lock: the
+        # segmentation worker and a frame repair may both use it)
         self._model = None
         self._model_key = None
         self._model_name = None
+        self._model_lock = threading.Lock()
 
     # ------------------------------------------------------------- lifecycle
     def start(self):
@@ -2461,16 +2518,543 @@ class SegmentationQueue:
             if osp.isfile(out_mp4):
                 os.remove(out_mp4)
                 removed.append(out_mp4)
+            repair_staging = job.repair_staging_dir()
+            if osp.isdir(repair_staging):
+                shutil.rmtree(repair_staging, ignore_errors=True)
+                removed.append(repair_staging)
+            repair_mp4 = job.repair_mp4_path()
+            if osp.isfile(repair_mp4):
+                os.remove(repair_mp4)
+                removed.append(repair_mp4)
             job.accepted = osp.isdir(job.accept_dest_dir())
             job.preview_status = "none"
             job.preview_progress = 0.0
             job.preview_error = None
+            job.repair_status = "none"
+            job.repair_progress = 0.0
+            job.repair_error = None
+            job.repair_frames = []
+            job.repair_direction = None
             job.message = (
                 f"Deleted {len(removed)} result item(s); "
                 "accepted frames under videos/ were kept"
                 if removed else "Nothing left to delete"
             )
         return {"ok": True, "removed": removed, "job": job.to_dict()}
+
+    # ------------------------------------------------------------- frame repair
+    # Repair for isolated flawed frames: seed a fresh tracking run from the
+    # previous or next frame's saved mask (initialize_from_mask), then
+    # re-track the requested frame range with step_video_masking. The repaired
+    # frames are staged (originals are never touched) and encoded into a
+    # separate repair preview mp4; the user then either accepts (rewriting the
+    # result tars + preview frames) or discards (staging deleted, originals
+    # kept as-is).
+
+    @staticmethod
+    def _parse_repair_frames(raw):
+        """Parse a user frame spec ('123', '130-132', '123,130-132') into a
+        sorted, de-duplicated list of ints."""
+        if raw is None:
+            return []
+        if isinstance(raw, (list, tuple)):
+            tokens = [str(x) for x in raw]
+        else:
+            tokens = [t for t in str(raw).replace("，", ",").split(",") if t.strip()]
+        frames = set()
+        for token in tokens:
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                if "-" in token:
+                    start_s, _, end_s = token.partition("-")
+                    start, end = int(start_s), int(end_s)
+                    if start < 0 or end < start:
+                        raise ValueError
+                    frames.update(range(start, end + 1))
+                else:
+                    value = int(token)
+                    if value < 0:
+                        raise ValueError
+                    frames.add(value)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid frame spec: {token!r} (use e.g. 123 or 130-132)"
+                )
+        return sorted(frames)
+
+    def _set_repair_progress(self, job, value):
+        with self._lock:
+            if job.status == "done" and job.repair_status == "running":
+                job.repair_progress = max(0.0, min(1.0, float(value)))
+
+    @staticmethod
+    def _tar_obj_index(tar_path):
+        """Object buffer index from a tar name written by _save_results
+        ('..._obj{1+objidx}_..._to_..._frames.tar'), or None if unparseable."""
+        match = re.search(r"obj(\d+)_", osp.basename(tar_path))
+        if not match:
+            return None
+        idx = int(match.group(1)) - 1
+        return idx if idx >= 0 else None
+
+    def _map_tar_to_objects(self, job, obj_idxs):
+        """Map each object buffer to its result tar (parsed from the tar name;
+        falls back to the single-tar / single-object case)."""
+        tars = [p for p in job.tar_result_paths() if osp.isfile(p)]
+        tar_by_obj = {}
+        for tar_path in tars:
+            idx = self._tar_obj_index(tar_path)
+            if idx is not None:
+                tar_by_obj[idx] = tar_path
+        if len(tars) == 1 and len(obj_idxs) == 1:
+            tar_by_obj.setdefault(obj_idxs[0], tars[0])
+        missing = [i for i in obj_idxs if i not in tar_by_obj]
+        if missing:
+            raise ValueError(
+                "Cannot map tar results to object buffer(s) "
+                f"{[i + 1 for i in missing]}"
+            )
+        return tar_by_obj
+
+    @staticmethod
+    def _read_video_frame(video_path, frame_idx):
+        """One full-resolution frame (orientation auto-corrected, same as the
+        playback reader). None when the frame can't be read."""
+        vcap = create_VideoCapture(video_path)
+        try:
+            vcap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+            ok, frame = vcap.read()
+            return frame if ok else None
+        finally:
+            vcap.release()
+
+    @staticmethod
+    def _read_seed_mask_from_tar(tar_path, frame_idx):
+        """Mask (alpha > 0) of a saved rgba frame inside a result tar; None
+        when the frame is missing or has no alpha channel."""
+        name = f"{frame_idx:08d}.png"
+        try:
+            with tarfile.open(tar_path, "r") as tar:
+                try:
+                    member = tar.getmember(name)
+                except KeyError:
+                    return None
+                fh = tar.extractfile(member)
+                raw = fh.read() if fh is not None else None
+        except (tarfile.TarError, OSError):
+            return None
+        if not raw:
+            return None
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if img is None or img.ndim < 3 or img.shape[2] < 4:
+            return None
+        return img[..., 3] > 0
+
+    @staticmethod
+    def _rewrite_tar_repaired_frames(tar_path, obj_staging_dir, frames):
+        """Rebuild a result tar, replacing the given frame indices with the
+        repaired pngs from obj_staging_dir (all other members copy through)."""
+        replacements = {}
+        for frame_idx in frames:
+            src = osp.join(obj_staging_dir, f"{frame_idx:08d}.png")
+            if osp.isfile(src):
+                with open(src, "rb") as fh:
+                    replacements[f"{frame_idx:08d}.png"] = fh.read()
+        if not replacements:
+            return
+        tmp_path = tar_path + ".repair.tmp"
+        with tarfile.open(tar_path, "r") as src_tar, \
+                tarfile.open(tmp_path, "w") as dst_tar:
+            for member in src_tar.getmembers():
+                if member.name in replacements:
+                    data = replacements[member.name]
+                    new_info = tarfile.TarInfo(name=member.name)
+                    new_info.size = len(data)
+                    new_info.mtime = member.mtime
+                    new_info.mode = member.mode
+                    dst_tar.addfile(new_info, io.BytesIO(data))
+                elif member.isfile():
+                    src_fh = src_tar.extractfile(member)
+                    if src_fh is not None:
+                        dst_tar.addfile(member, src_fh)
+                    else:
+                        dst_tar.addfile(member)
+                else:
+                    dst_tar.addfile(member)
+        os.replace(tmp_path, tar_path)
+
+    def start_repair(self, job_id, frames_raw, direction):
+        """Validate + launch a background frame repair. Returns the job dict."""
+        direction = str(direction or "forward")
+        if direction not in ("forward", "backward"):
+            raise ValueError("Repair direction must be 'forward' or 'backward'")
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.status != "done":
+                raise ValueError("Only finished jobs support frame repair")
+            if bool(job.config.get("pure_text")):
+                raise ValueError(
+                    "Frame repair needs a tracking-mode job (pure_text jobs "
+                    "generate independent per-frame detections)"
+                )
+            if job.accepted or osp.isdir(job.accept_dest_dir()):
+                raise ValueError(
+                    "Mask frames are already accepted - frame repair is not available"
+                )
+            if job.repair_status == "running":
+                raise ValueError("A frame repair is already running for this job")
+            frames = self._parse_repair_frames(frames_raw)
+            total = int(job.total_frames or 0)
+            if total <= 0:
+                raise ValueError("This job has no recorded frame count - cannot repair")
+            if not frames:
+                raise ValueError(
+                    "No frames to repair (enter a frame number or range, "
+                    "e.g. 123 or 130-132)"
+                )
+            if any(f < 0 or f >= total for f in frames):
+                raise ValueError(f"Frame index out of range 0..{total - 1}: {frames}")
+            seed = (frames[0] - 1) if direction == "forward" else (frames[-1] + 1)
+            if not (0 <= seed < total):
+                side = "before the range" if direction == "forward" else "after the range"
+                raise ValueError(
+                    f"Need a saved mask {side} as the tracking seed "
+                    f"(seed frame {seed} is out of range 0..{total - 1})"
+                )
+            if not [p for p in job.tar_result_paths() if osp.isfile(p)]:
+                raise ValueError(
+                    "No tar result files for this job (results deleted or saved as mp4)"
+                )
+            png_dir = job.preview_png_dir()
+            if not (
+                osp.isdir(png_dir)
+                and any(n.lower().endswith(".png") for n in os.listdir(png_dir))
+            ):
+                raise ValueError(
+                    "Press Preview first: the repair preview is built on top of "
+                    "the generated mask frames"
+                )
+            # drop leftovers of an earlier (stale / failed) pending repair
+            staging = job.repair_staging_dir()
+            if osp.isdir(staging):
+                shutil.rmtree(staging, ignore_errors=True)
+            repair_mp4 = job.repair_mp4_path()
+            if osp.isfile(repair_mp4):
+                os.remove(repair_mp4)
+            job.repair_status = "running"
+            job.repair_progress = 0.0
+            job.repair_error = None
+            job.repair_direction = direction
+            job.repair_frames = frames
+        threading.Thread(
+            target=self._run_repair, args=(job, frames, direction),
+            name=f"seg-repair-{job.job_id}", daemon=True,
+        ).start()
+        return job.to_dict()
+
+    def _run_repair(self, job, frames, direction):
+        """Worker thread wrapper: record ready / error on the job."""
+        try:
+            self._execute_repair(job, frames, direction)
+            with self._lock:
+                if job.repair_status == "running":
+                    job.repair_status = "ready"
+                    job.repair_progress = 1.0
+        except Exception as err:  # noqa: BLE001
+            with self._lock:
+                if job.repair_status == "running":
+                    job.repair_status = "error"
+                    job.repair_error = f"{type(err).__name__}: {err}"
+            traceback.print_exc()
+
+    def _execute_repair(self, job, frames, direction):
+        """Re-track the frame range from the seed frame's saved mask and build
+        the staged repaired frames + the repair preview mp4. Never modifies the
+        job's original results (tars, preview pngs, preview mp4)."""
+        cfg = job.config
+        device = str(cfg["device"])
+        num_frames = int(job.total_frames or 0)
+        min_f, max_f = frames[0], frames[-1]
+        seed_f = min_f - 1 if direction == "forward" else max_f + 1
+        imgenc_config_dict = {
+            "max_side_length": int(cfg["base_size_px"]),
+            "use_square_sizing": not bool(cfg["use_aspect_ratio"]),
+        }
+        save_masking = FrameCompositing(
+            FrameCompositing.parse_hex_color(cfg["bg_color_hex"])
+        )
+        staging = job.repair_staging_dir()
+        png_dir = job.preview_png_dir()
+
+        vreader = ReversibleLoopingVideoReader(job.video_path)
+        try:
+            with self._model_lock:
+                model, _model_name = self._get_model(
+                    cfg["model_path"], device, bool(cfg["use_float32"])
+                )
+
+                # load the exemplar banks (same logic as _run_job_frames)
+                torch.serialization.add_safe_globals(
+                    [SAMVideoObjectResults, SAMVideoBuffer, deque]
+                )
+                loaded_states = []
+                for prompt_path in job.prompt_paths:
+                    loaded_data = torch.load(
+                        prompt_path, map_location=device, weights_only=False
+                    )
+                    loaded_states.append(
+                        (prompt_path, *unpack_tracking_state(loaded_data))
+                    )
+                num_obj_buffers = int(cfg["num_buffers"])
+                if len(loaded_states) == 1:
+                    _path, loaded_objects, _texts = loaded_states[0]
+                    memory_list = [None] * num_obj_buffers
+                    for objidx, mem in loaded_objects.items():
+                        if not isinstance(objidx, int) or not 0 <= objidx < num_obj_buffers:
+                            raise ValueError(
+                                f"Prompt file contains invalid "
+                                f"object-buffer index: {objidx!r}"
+                            )
+                        memory_list[objidx] = mem
+                else:
+                    memory_list = self._merge_prompt_states(loaded_states, num_obj_buffers)
+                obj_idxs = [
+                    i for i in range(num_obj_buffers)
+                    if memory_list[i] is not None and memory_list[i].check_has_prompts()
+                ]
+                if not obj_idxs:
+                    raise ValueError(
+                        "No valid prompts found in the .pt file(s) - nothing to repair"
+                    )
+                self._move_memory_to_device(memory_list, device)
+                tar_by_obj = self._map_tar_to_objects(job, obj_idxs)
+
+                seed_frame = self._read_video_frame(job.video_path, seed_f)
+                if seed_frame is None:
+                    raise ValueError(f"Could not read seed frame {seed_f} from the video")
+
+                total_steps = len(frames) * len(obj_idxs) + num_frames
+                repaired_steps = 0
+                # re-track every object buffer from the seed frame's saved mask
+                for objidx in obj_idxs:
+                    obj_dir = osp.join(staging, f"obj{objidx:02d}")
+                    os.makedirs(obj_dir, exist_ok=True)
+                    seed_mask = self._read_seed_mask_from_tar(tar_by_obj[objidx], seed_f)
+                    if seed_mask is None or not seed_mask.any():
+                        raise ValueError(
+                            f"Object {objidx + 1} has no saved mask pixels on the "
+                            f"seed frame {seed_f} - try the other repair direction"
+                        )
+                    encoded_seed, _, _ = model.encode_image(seed_frame, **imgenc_config_dict)
+                    seed_mem = model.initialize_from_mask(encoded_seed, seed_mask)
+                    track_state = SAMVideoObjectResults.create()
+                    track_state.prompts_buffer = memory_list[objidx].prompts_buffer
+                    track_state.prevframe_buffer.store(seed_f, seed_mem)
+                    if direction == "backward":
+                        vreader.toggle_reverse_state(True)
+                    vreader.set_playback_position(seed_f, is_normalized=False)
+                    step_order = (
+                        range(min_f, max_f + 1)
+                        if direction == "forward"
+                        else range(max_f, min_f - 1, -1)
+                    )
+                    for frame_idx in step_order:
+                        _is_paused, got_idx, frame = next(vreader)
+                        if got_idx != frame_idx:
+                            raise ValueError(
+                                f"Frame read mismatch while repairing "
+                                f"(expected {frame_idx}, got {got_idx})"
+                            )
+                        encoded_img, _, _ = model.encode_image(frame, **imgenc_config_dict)
+                        _obj_score, best_mask_idx, mask_preds, mem_enc, obj_ptr = (
+                            model.step_video_masking(encoded_img, **track_state.to_dict())
+                        )
+                        tracked_mask_idx = int(best_mask_idx.squeeze().cpu())
+                        track_state.store_frame_result(frame_idx, mem_enc, obj_ptr)
+                        save_mask = BaseUIControl.create_hires_mask_uint8(
+                            mask_preds, tracked_mask_idx, frame.shape[0:2]
+                        )
+                        save_frame = save_masking.mask_frame(frame, save_mask)
+                        ok, png = cv2.imencode(".png", save_frame)
+                        if not ok:
+                            raise ValueError(f"Failed to encode repaired frame {frame_idx}")
+                        with open(osp.join(obj_dir, f"{frame_idx:08d}.png"), "wb") as fh:
+                            fh.write(png.tobytes())
+                        repaired_steps += 1
+                        self._set_repair_progress(
+                            job, 0.6 * repaired_steps / total_steps
+                        )
+                    vreader.toggle_reverse_state(False)
+
+            # merge the repaired per-object frames (same overlay order as Preview)
+            merged_dir = osp.join(staging, "merged")
+            os.makedirs(merged_dir, exist_ok=True)
+            for frame_idx in frames:
+                datas = []
+                for objidx in obj_idxs:
+                    data = cv2.imread(
+                        osp.join(staging, f"obj{objidx:02d}", f"{frame_idx:08d}.png"),
+                        cv2.IMREAD_UNCHANGED,
+                    )
+                    if data is None or data.ndim < 4:
+                        raise ValueError(
+                            f"Failed to read repaired frame {frame_idx} (object {objidx + 1})"
+                        )
+                    datas.append(data)
+                merged = datas[0].copy()
+                for data in datas[1:]:
+                    m = data[..., 3] > 0
+                    merged[m] = data[m]
+                ok, png = cv2.imencode(".png", merged)
+                if not ok:
+                    raise ValueError(f"Failed to encode merged repaired frame {frame_idx}")
+                with open(osp.join(merged_dir, f"{frame_idx:08d}.png"), "wb") as fh:
+                    fh.write(png.tobytes())
+
+            # metadata for accept / discard (survives a server restart)
+            with open(osp.join(staging, "meta.json"), "w", encoding="utf-8") as fh:
+                json.dump({
+                    "frames": frames,
+                    "direction": direction,
+                    "seed_frame": seed_f,
+                    "objects": obj_idxs,
+                    "created_at": time.time(),
+                }, fh)
+
+            # encode the repair preview: repaired range from staging, the rest
+            # of the video from the existing preview frames
+            try:
+                import imageio  # lazy: only needed while encoding
+            except ImportError as err:
+                raise RuntimeError(
+                    "imageio / imageio-ffmpeg is required to encode the "
+                    "repair preview mp4"
+                ) from err
+            writer = imageio.get_writer(
+                job.repair_mp4_path(), fps=30, codec="libx264", quality=5,
+                ffmpeg_params=["-movflags", "+faststart"],
+            )
+            try:
+                for frame_idx in range(num_frames):
+                    if min_f <= frame_idx <= max_f:
+                        path = osp.join(merged_dir, f"{frame_idx:08d}.png")
+                    else:
+                        path = osp.join(png_dir, f"{frame_idx:08d}.png")
+                    data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                    if data is None or data.ndim < 3:
+                        raise ValueError(f"Missing preview frame {frame_idx}")
+                    out_frame = data[:, :, :3].copy()
+                    alpha = data[..., 3]
+                    out_frame[alpha == 0] = 255  # white outside the masked region
+                    writer.append_data(cv2.cvtColor(out_frame, cv2.COLOR_BGR2RGB))
+                    self._set_repair_progress(
+                        job, 0.6 + 0.4 * (frame_idx + 1) / num_frames
+                    )
+            finally:
+                writer.close()
+        finally:
+            try:
+                vreader.release()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _apply_repair(self, job, frames, objects, direction):
+        """File work for accepting a repair: rewrite the result tars
+        (replacing only the repaired frames), overwrite the preview pngs,
+        re-encode the preview mp4, delete the staging. The queue lock is NOT
+        held while this runs (it can take a while for long videos)."""
+        staging = job.repair_staging_dir()
+        tar_by_obj = self._map_tar_to_objects(job, objects)
+        for objidx in objects:
+            self._rewrite_tar_repaired_frames(
+                tar_by_obj[objidx], osp.join(staging, f"obj{objidx:02d}"), frames
+            )
+        png_dir = job.preview_png_dir()
+        os.makedirs(png_dir, exist_ok=True)
+        merged_dir = osp.join(staging, "merged")
+        for frame_idx in frames:
+            src = osp.join(merged_dir, f"{frame_idx:08d}.png")
+            if osp.isfile(src):
+                shutil.copyfile(src, osp.join(png_dir, f"{frame_idx:08d}.png"))
+        frame_paths = sorted(
+            osp.join(png_dir, n) for n in os.listdir(png_dir)
+            if n.lower().endswith(".png")
+        )
+        if frame_paths:
+            self._encode_preview_video(job, frame_paths, job.preview_mp4_path())
+        shutil.rmtree(staging, ignore_errors=True)
+        repair_mp4 = job.repair_mp4_path()
+        if osp.isfile(repair_mp4):
+            os.remove(repair_mp4)
+        with self._lock:
+            job.repair_status = "accepted"
+            job.repair_progress = 1.0
+            job.repair_error = None
+            job.repair_direction = direction
+            job.repair_frames = list(frames)
+            job.preview_status = "ready"
+            job.preview_progress = 1.0
+            job.preview_error = None
+            job.message = (
+                f"Repair accepted: {len(frames)} frame(s) rewritten in the result "
+                f"tar(s) + preview frames"
+            )
+
+    def accept_repair(self, job_id):
+        """Apply a pending frame repair (see _apply_repair). Returns the
+        job dict. The job can then be accepted to ./videos/ as usual."""
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.status != "done":
+                raise ValueError("Only finished jobs support frame repair")
+            if job.repair_status == "running":
+                raise ValueError("The repair is still running - wait for it to finish")
+            if getattr(job, "_repair_accepting", False):
+                raise ValueError("Repair accept is already in progress for this job")
+            meta_path = osp.join(job.repair_staging_dir(), "meta.json")
+            if not osp.isfile(meta_path):
+                raise ValueError("No pending repair to accept - start a repair first")
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh)
+            frames = [int(f) for f in meta.get("frames", [])]
+            objects = [int(o) for o in meta.get("objects", [])]
+            direction = str(meta.get("direction") or job.repair_direction or "forward")
+            if not frames or not objects:
+                raise ValueError("Repair metadata is empty - start a repair first")
+            job._repair_accepting = True
+        try:
+            self._apply_repair(job, frames, objects, direction)
+        finally:
+            with self._lock:
+                job._repair_accepting = False
+        return job.to_dict()
+
+    def discard_repair(self, job_id):
+        """Throw away a pending frame repair (original results stay as-is)."""
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.repair_status == "running":
+                raise ValueError("The repair is still running - wait for it to finish")
+            staging = job.repair_staging_dir()
+            if osp.isdir(staging):
+                shutil.rmtree(staging, ignore_errors=True)
+            repair_mp4 = job.repair_mp4_path()
+            if osp.isfile(repair_mp4):
+                os.remove(repair_mp4)
+            job.repair_status = "none"
+            job.repair_progress = 0.0
+            job.repair_error = None
+            job.repair_frames = []
+            job.repair_direction = None
+        return job.to_dict()
 
     # ------------------------------------------------------------- worker
     def _worker_loop(self):
@@ -2628,7 +3212,7 @@ class SegmentationQueue:
                             f"({100.0 * n / total_frames:.0f}%)"
                         )
 
-        with torch.inference_mode():
+        with torch.inference_mode(), self._model_lock:
             for is_paused, frame_idx, frame in vreader:
                 if _cancelled():
                     break
@@ -3138,6 +3722,16 @@ class Handler(BaseHTTPRequestHandler):
                     status=404,
                 )
             return self._send_file_range(mp4, "video/mp4")
+        if route == "/api/seg/repair_video":
+            job_id = (qs.get("job_id") or [""])[0]
+            job = SEG_QUEUE.get_job(job_id)
+            mp4 = job.repair_mp4_path() if job is not None else None
+            if job is None or job.status != "done" or not mp4 or not osp.isfile(mp4):
+                return self._send_json(
+                    {"ok": False, "error": "Repair preview video not found (start a repair first)"},
+                    status=404,
+                )
+            return self._send_file_range(mp4, "video/mp4")
         if route == "/api/seg/browse":
             path = (qs.get("path") or [""])[0]
             kind = (qs.get("kind") or ["video"])[0]
@@ -3229,6 +3823,18 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/seg/preview":
             job, queued = SEG_QUEUE.start_preview(body.get("job_id"))
             return self._send_json({"ok": True, "job": job, "queued": queued})
+        if route == "/api/seg/repair":
+            job = SEG_QUEUE.start_repair(
+                body.get("job_id"), body.get("frames"),
+                body.get("direction", "forward"),
+            )
+            return self._send_json({"ok": True, "job": job})
+        if route == "/api/seg/repair/accept":
+            job = SEG_QUEUE.accept_repair(body.get("job_id"))
+            return self._send_json({"ok": True, "job": job})
+        if route == "/api/seg/repair/discard":
+            job = SEG_QUEUE.discard_repair(body.get("job_id"))
+            return self._send_json({"ok": True, "job": job})
         if route == "/api/seg/accept":
             job = SEG_QUEUE.accept_job(body.get("job_id"))
             return self._send_json({"ok": True, "job": job})

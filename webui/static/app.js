@@ -44,6 +44,7 @@ const state = {
   dirSelected: null,  // absolute path of selected entry (file or folder) in the Open dialog
   dirSelectedIsDir: null,
   segJobs: [],        // last segmentation queue snapshot (for button handlers)
+  segRepairJobId: null, // job whose repair dialog / repair preview is open
 };
 
 // ------------------------------------------------------------------ helpers
@@ -1254,6 +1255,63 @@ function segPreviewButtonHtml(job) {
     ${job.has_tars ? "" : "disabled"} title="${title}">Preview</button>`;
 }
 
+// Frame repair for finished jobs (isolated flawed frames):
+//   none/error -> "Repair" (opens the frame-range + direction dialog)
+//   running    -> progress ring
+//   ready      -> play the repair preview / accept repair / discard + chip
+//   accepted   -> static "repaired" chip (result files already rewritten)
+function fmtRepairFrames(frames) {
+  if (!frames || !frames.length) return "";
+  const fs = frames.slice().sort((a, b) => a - b);
+  const parts = [];
+  let start = fs[0];
+  let prev = fs[0];
+  for (let i = 1; i < fs.length; i++) {
+    if (fs[i] === prev + 1) { prev = fs[i]; continue; }
+    parts.push(start === prev ? String(start) : start + "-" + prev);
+    start = prev = fs[i];
+  }
+  parts.push(start === prev ? String(start) : start + "-" + prev);
+  return parts.join(", ");
+}
+
+function segRepairHtml(job) {
+  const id = escHtml(job.job_id);
+  const st = job.repair_status || "none";
+  if (st === "running") {
+    const p = Math.max(0, Math.min(1, job.repair_progress || 0));
+    const off = (RING_CIRC * (1 - p)).toFixed(2);
+    return `<button class="seg-repair running" data-id="${id}" disabled
+      title="Re-tracking the repaired frame range from the seed frame's mask...">
+      <svg class="seg-ring" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
+        <circle class="seg-ring-bg" cx="10" cy="10" r="8"></circle>
+        <circle class="seg-ring-fg" cx="10" cy="10" r="8"
+          stroke-dasharray="${RING_CIRC.toFixed(2)}" stroke-dashoffset="${off}"></circle>
+      </svg>
+      <span>Repair ${Math.round(p * 100)}%</span>
+    </button>`;
+  }
+  if (st === "ready") {
+    const rangeText = fmtRepairFrames(job.repair_frames);
+    return `
+      <button class="seg-repair-preview" data-id="${id}"
+        title="Play the repaired mask preview (original result files are unchanged yet)">&#x25B6; Repair</button>
+      <button class="seg-repair-accept primary" data-id="${id}"
+        title="Rewrite the result tar(s) + preview frames with the repaired result">Accept repair</button>
+      <button class="seg-repair-discard danger" data-id="${id}"
+        title="Throw away the pending repair (original results are kept)">Discard</button>
+      <span class="seg-repair-chip" title="Pending repair (not applied yet): ${escHtml(rangeText)}">pending: ${escHtml(rangeText)}</span>`;
+  }
+  if (st === "accepted") {
+    const rangeText = fmtRepairFrames(job.repair_frames);
+    return `<span class="seg-repair-chip ok"
+      title="Frame repair applied (result tar(s) + preview frames rewritten): ${escHtml(rangeText)}">repaired: ${escHtml(rangeText)}</span>`;
+  }
+  if (job.accepted || !job.has_tars) return "";
+  return `<button class="seg-repair-open" data-id="${id}"
+    title="Repair isolated flawed frames: seed tracking from the previous or next frame's mask, re-track the range, then preview before accepting">Repair</button>`;
+}
+
 function segJobHtml(job) {
   const cls = job.status; // queued|running|done|error|cancelled
   const pct = Math.max(0, Math.min(100, (job.progress || 0) * 100));
@@ -1276,6 +1334,10 @@ function segJobHtml(job) {
   if (job.status === "done" && job.preview_status === "error" && job.preview_error) {
     previewErrHtml = `<div class="seg-job-err">preview: ${escHtml(job.preview_error)}</div>`;
   }
+  let repairErrHtml = "";
+  if (job.status === "done" && job.repair_status === "error" && job.repair_error) {
+    repairErrHtml = `<div class="seg-job-err">repair: ${escHtml(job.repair_error)}</div>`;
+  }
   // 追加要求2: bottom-right actions for finished jobs
   let actionsHtml = "";
   if (job.status === "done") {
@@ -1284,6 +1346,7 @@ function segJobHtml(job) {
       : "Move the generated mask frames to ./videos/<garment>/<name>/";
     actionsHtml = `<div class="seg-job-actions">
       ${segPreviewButtonHtml(job)}
+      ${segRepairHtml(job)}
       <button class="seg-accept" data-id="${escHtml(job.job_id)}"
         ${job.has_tars && !job.accepted ? "" : "disabled"} title="${acceptTitle}">Accept</button>
       <button class="seg-delete danger" data-id="${escHtml(job.job_id)}"
@@ -1315,6 +1378,7 @@ function segJobHtml(job) {
     ${job.message ? `<div class="seg-job-msg">${escHtml(job.message)}</div>` : ""}
     ${errHtml}
     ${previewErrHtml}
+    ${repairErrHtml}
     ${resultsHtml}
     ${actionsHtml}
   </div>`;
@@ -1384,6 +1448,18 @@ function renderSegQueue(data) {
   });
   list.querySelectorAll(".seg-accept").forEach((btn) => {
     btn.onclick = () => acceptSegJob(btn.dataset.id);
+  });
+  list.querySelectorAll(".seg-repair-open").forEach((btn) => {
+    btn.onclick = () => openSegRepairDialog(btn.dataset.id);
+  });
+  list.querySelectorAll(".seg-repair-preview").forEach((btn) => {
+    btn.onclick = () => openSegRepairPreview(btn.dataset.id);
+  });
+  list.querySelectorAll(".seg-repair-accept").forEach((btn) => {
+    btn.onclick = () => acceptSegRepair(btn.dataset.id);
+  });
+  list.querySelectorAll(".seg-repair-discard").forEach((btn) => {
+    btn.onclick = () => discardSegRepair(btn.dataset.id);
   });
   list.querySelectorAll(".seg-delete").forEach((btn) => {
     btn.onclick = () => deleteSegJob(btn.dataset.id);
@@ -1535,6 +1611,7 @@ function openSegPreview(job) {
   $("seg-preview-title").textContent =
     `Mask preview \u00b7 ${job.label || job.job_id}`;
   video.src = job.preview_url;
+  $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "flex";
   video.play().catch(() => { /* user can press play manually */ });
 }
@@ -1544,6 +1621,7 @@ function closeSegPreview() {
   video.pause();
   video.removeAttribute("src");
   video.load(); // stop downloading
+  $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "none";
 }
 
@@ -1571,6 +1649,112 @@ async function deleteSegJob(jobId) {
     await api("/api/seg/delete", { method: "POST", body: { job_id: jobId } });
     toast("Result files deleted");
     await pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+// ---- frame repair (isolated flawed frames) ----
+function findSegJob(jobId) {
+  return (state.segJobs || []).find((j) => j.job_id === jobId) || null;
+}
+
+function openSegRepairDialog(jobId) {
+  const job = findSegJob(jobId);
+  if (!job) return;
+  state.segRepairJobId = jobId;
+  $("seg-repair-title").textContent =
+    `Repair flawed frames \u00b7 ${job.label || job.job_id}`;
+  $("seg-repair-total").textContent =
+    job.total_frames > 0 ? String(job.total_frames) : "?";
+  $("seg-repair-frames").value = "";
+  const fwd = document.querySelector('input[name="seg-repair-dir"][value="forward"]');
+  if (fwd) fwd.checked = true;
+  $("seg-repair-dialog").style.display = "flex";
+  $("seg-repair-frames").focus();
+}
+
+function closeSegRepairDialog() {
+  $("seg-repair-dialog").style.display = "none";
+  state.segRepairJobId = null;
+}
+
+async function submitSegRepair() {
+  const jobId = state.segRepairJobId;
+  if (!jobId) return;
+  const frames = $("seg-repair-frames").value.trim();
+  if (!frames) {
+    toast("Enter a frame number or range first (e.g. 123 or 130-132)", true);
+    return;
+  }
+  const dirEl = document.querySelector('input[name="seg-repair-dir"]:checked');
+  const direction = dirEl ? dirEl.value : "forward";
+  try {
+    await api("/api/seg/repair", {
+      method: "POST",
+      body: { job_id: jobId, frames, direction },
+    });
+    closeSegRepairDialog();
+    toast("Frame repair started\u2026");
+    pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+// Reuses the mask-preview video dialog; the footer gains accept / discard.
+function openSegRepairPreview(jobId) {
+  const job = findSegJob(jobId);
+  if (!job || !job.repair_url) return;
+  state.segRepairJobId = jobId;
+  const rangeText = fmtRepairFrames(job.repair_frames);
+  const seedText = job.repair_direction === "backward"
+    ? "next frame's mask, tracked backward"
+    : "previous frame's mask, tracked forward";
+  $("seg-repair-hint").textContent =
+    `Frames ${rangeText} re-tracked from the ${seedText}. ` +
+    "Accept rewrites the result tar(s) + preview frames; Discard keeps the original result.";
+  const video = $("seg-preview-video");
+  $("seg-preview-title").textContent =
+    `Repair preview \u00b7 ${job.label || job.job_id}`;
+  video.src = job.repair_url;
+  $("seg-repair-actions").style.display = "flex";
+  $("seg-preview-dialog").style.display = "flex";
+  video.play().catch(() => { /* user can press play manually */ });
+}
+
+async function acceptSegRepair(jobId) {
+  const ok = confirm(
+    "Apply this frame repair? The result tar(s) and the generated preview " +
+    "frames will be rewritten with the repaired frames."
+  );
+  if (!ok) return;
+  try {
+    const res = await api("/api/seg/repair/accept", {
+      method: "POST",
+      body: { job_id: jobId },
+    });
+    closeSegPreview();
+    toast((res && res.job && res.job.message) || "Repair accepted: result files rewritten");
+    pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  }
+}
+
+async function discardSegRepair(jobId) {
+  const ok = confirm(
+    "Discard this frame repair? The original result files are kept as-is."
+  );
+  if (!ok) return;
+  try {
+    await api("/api/seg/repair/discard", {
+      method: "POST",
+      body: { job_id: jobId },
+    });
+    closeSegPreview();
+    toast("Repair discarded - original results are kept");
+    pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
   }
@@ -1892,9 +2076,32 @@ function wireSeg() {
   $("seg-preview-dialog").addEventListener("click", (evt) => {
     if (evt.target === $("seg-preview-dialog")) closeSegPreview();
   });
+
+  // frame repair dialog + accept/discard actions in the video dialog
+  $("seg-repair-cancel").onclick = closeSegRepairDialog;
+  $("seg-repair-ok").onclick = submitSegRepair;
+  $("seg-repair-discard").onclick = () => {
+    if (state.segRepairJobId) discardSegRepair(state.segRepairJobId);
+  };
+  $("seg-repair-accept").onclick = () => {
+    if (state.segRepairJobId) acceptSegRepair(state.segRepairJobId);
+  };
+  $("seg-repair-dialog").addEventListener("click", (evt) => {
+    if (evt.target === $("seg-repair-dialog")) closeSegRepairDialog();
+  });
+  $("seg-repair-frames").addEventListener("keydown", (evt) => {
+    if (evt.key === "Enter") submitSegRepair();
+  });
   document.addEventListener("keydown", (evt) => {
-    if (evt.key === "Escape" && $("seg-preview-dialog").style.display !== "none") {
-      closeSegPreview();
+    if (evt.key === "Escape") {
+      if ($("seg-repair-dialog").style.display !== "none") {
+        closeSegRepairDialog();
+        return;
+      }
+      if ($("seg-preview-dialog").style.display !== "none") {
+        closeSegPreview();
+        return;
+      }
     }
   });
 }

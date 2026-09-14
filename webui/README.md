@@ -196,7 +196,7 @@ Finished jobs **persist across server restarts** — they are written to
 queued/running when the server stopped are shown as cancelled with a note).
 They are removed only by **Clear all**.
 
-### Preview / Accept / Delete (finished jobs)
+### Preview / Repair / Accept / Delete (finished jobs)
 
 Each finished job card has three buttons on the bottom right:
 
@@ -210,6 +210,30 @@ Each finished job card has three buttons on the bottom right:
   progress bar, X in the top-right corner; the video just stops when finished,
   the window stays open). Requires `imageio` + `imageio-ffmpeg` (same as
   `util/multithread_video_writer.py`).
+- **Repair** — for isolated flawed frames (the mask breaks on a frame or
+  short range, then tracking recovers). Opens a dialog to enter the frame
+  number / range (0-based, e.g. `123` or `130-132`) and a direction:
+  - **forward** — the mask of the frame right before the range is used as the
+    seed; the range is re-tracked forward from it;
+  - **backward** — the mask of the frame right after the range is used as the
+    seed; the range is re-tracked backward from it.
+
+  Mechanically this seeds a fresh tracking run with
+  `initialize_from_mask(encoded_seed_frame, saved_mask)` and steps the range
+  with `step_video_masking` (same calls as normal tracking; the saved
+  exemplar bank is kept as the prompt memory). The repaired frames are staged
+  under `./generated_mask_videos/.repair_staging/<job_id>/` and encoded into
+  `./generated_mask_videos/<video_stem>_repaired_mask.mp4` — **the original
+  result files are not touched until you decide**. The button row then shows
+  `▶ Repair` (play the repair preview in the same video dialog, which gains
+  **Accept repair** / **Discard** buttons in the footer),
+  **Accept repair** (rewrites the result tar(s) — replacing only the repaired
+  frames — overwrites the generated preview frames, re-encodes the preview
+  mp4, and deletes the staging; the job can afterwards be Accepted to
+  `./videos/` as usual), and **Discard** (staging + repair mp4 are deleted,
+  original results kept as-is). A `pending: …` / `repaired: …` chip shows the
+  affected frames. Tracking-mode jobs only (not pure_text), and not available
+  once the mask frames have been accepted.
 - **Accept** — moves the generated frames to `./videos/<garment>/<video_stem>/`
   (`<garment>` is the video stem without its last `_`-separated part, exactly
   like `check_generated_masks.py`).
@@ -248,6 +272,12 @@ output layout as the script.
   generation; returns `queued: true` when the job waits behind another
   preview
 - `GET  /api/seg/preview_video?job_id=` — stream the preview mp4 (Range-aware)
+- `POST /api/seg/repair` — `{job_id, frames, direction: forward|backward}`
+  start a frame repair (runs in the background; progress in the job poll)
+- `GET  /api/seg/repair_video?job_id=` — stream the repair preview mp4 (Range-aware)
+- `POST /api/seg/repair/accept` — `{job_id}` rewrite the result tar(s) +
+  preview frames with the repaired result
+- `POST /api/seg/repair/discard` — `{job_id}` throw away the pending repair
 - `POST /api/seg/accept` — `{job_id}` move frames to `./videos/<garment>/<name>/`
 - `POST /api/seg/delete` — `{job_id}` delete the job's result artifacts
 
@@ -267,6 +297,6 @@ output layout as the script.
   single source of truth for playback (forward/reverse/looping).
 - Mask previews are encoded with `imageio` + `imageio-ffmpeg` (the same
   dependency `util/multithread_video_writer.py` / `check_generated_masks.py`
-  use); only the Preview action needs it.
+  use); the Preview and Repair actions need it.
 - Per the task, this was developed only — it has not been run/tested on this
   machine.
