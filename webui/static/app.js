@@ -1794,7 +1794,15 @@ function renderSegRepairTimeline() {
   }
   scrubber.disabled = false;
   scrubber.max = String(total - 1);
-  scrubber.value = String(segRepairCursorFrame());
+  // A/B and keyboard adjustments can be one seek ahead of the decoder.
+  // While paused, preserve that explicitly selected target instead of
+  // snapping the progress thumb back to the last decoded frame (often A
+  // immediately after Set B).
+  const video = $("seg-preview-video");
+  const displayFrame = video.paused && Number.isInteger(state.segRepairTargetFrame)
+    ? state.segRepairTargetFrame
+    : segRepairCursorFrame();
+  scrubber.value = String(displayFrame);
   markers.innerHTML = pick.clips.map((clip, index) => {
     // Positions are expressed against the first/last frame endpoints so a
     // clip touching the last frame still ends inside the displayed track.
