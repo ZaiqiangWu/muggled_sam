@@ -1642,6 +1642,10 @@ def _normalize_seg_config(cfg: dict) -> dict:
     return cfg
 
 
+class RepairCancelled(Exception):
+    """Internal signal used to stop repair I/O before a job is deleted."""
+
+
 class SegJob:
     """One queued video-segmentation job (a single input video + prompt file)."""
 
@@ -1694,6 +1698,9 @@ class SegJob:
         self.repair_clips = []
         self.repair_active_clip = None  # clip index while one is being applied
         self.repair_phase = None        # human-readable stage while accepting
+        # Serializes repair workers with deletion so a cancelled worker cannot
+        # recreate files after Delete has removed them.
+        self._repair_io_lock = threading.Lock()
 
     def request_cancel(self):
         self._cancel_requested = True
@@ -2502,7 +2509,9 @@ class SegmentationQueue:
             raise ValueError("No mask frames generated")
         self._encode_preview_video(job, frame_paths, out_mp4)
 
-    def _encode_preview_video(self, job, frame_paths, out_path, progress=None):
+    def _encode_preview_video(
+        self, job, frame_paths, out_path, progress=None, cancel_check=None
+    ):
         """Encode 'white background + original pixels inside the mask' mp4."""
         try:
             import imageio  # lazy: only needed while generating a preview
@@ -2517,6 +2526,8 @@ class SegmentationQueue:
         try:
             n = len(frame_paths)
             for i, path in enumerate(frame_paths):
+                if cancel_check is not None and cancel_check():
+                    raise RepairCancelled("Repair was cancelled for deletion")
                 data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
                 if data is None or data.ndim < 3:
                     raise ValueError(f"Failed to read mask frame: {path}")
@@ -2574,63 +2585,69 @@ class SegmentationQueue:
         here (rather than leaving an empty finished job behind) also removes
         it from the persisted server-restart history.
         """
+        # Signal an applying repair first, then wait for its per-job I/O lock
+        # without holding the queue lock. The worker observes cancellation
+        # while encoding and releases this lock before any files are removed.
         with self._lock:
             job = self._by_id.get(job_id)
             if job is None:
                 raise ValueError(f"No such job: {job_id}")
             if job.status != "done":
                 raise ValueError(f"Only finished jobs can be deleted (job is {job.status})")
+            repair_lock = None
             if job.repair_status in ("running", "accepting"):
-                raise ValueError(
-                    "A frame repair is in progress - wait for it to finish "
-                    "before deleting"
-                )
-            removed = []
-            # drop a queued preview so the worker does not start it after the
-            # tars are gone
-            try:
-                self._preview_queue.remove(job_id)
-            except ValueError:
-                pass
-            for path in list(job.saved_paths):
-                if osp.isfile(path):
-                    os.remove(path)
-                    removed.append(path)
-            png_dir = job.preview_png_dir()
-            if osp.isdir(png_dir):
-                shutil.rmtree(png_dir, ignore_errors=True)
-                removed.append(png_dir)
-            out_mp4 = job.preview_mp4_path()
-            if osp.isfile(out_mp4):
-                os.remove(out_mp4)
-                removed.append(out_mp4)
-            repair_staging = job.repair_staging_dir()
-            if osp.isdir(repair_staging):
-                shutil.rmtree(repair_staging, ignore_errors=True)
-                removed.append(repair_staging)
-            for mp4 in job.repair_mp4_paths():
+                job.request_cancel()
+                repair_lock = job._repair_io_lock
+        if repair_lock is not None:
+            repair_lock.acquire()
+        try:
+            with self._lock:
+                job = self._by_id.get(job_id)
+                if job is None:
+                    raise ValueError(f"No such job: {job_id}")
+                removed = []
+                # drop a queued preview so the worker does not start it after
+                # the tars are gone
                 try:
-                    os.remove(mp4)
-                    removed.append(mp4)
-                except OSError:  # noqa: BLE001
+                    self._preview_queue.remove(job_id)
+                except ValueError:
                     pass
-            overrides_dir = job.repair_overrides_dir()
-            if osp.isdir(overrides_dir):
-                shutil.rmtree(overrides_dir, ignore_errors=True)
-                removed.append(overrides_dir)
-            job.accepted = osp.isdir(job.accept_dest_dir())
-            job.preview_status = "none"
-            job.preview_progress = 0.0
-            job.preview_error = None
-            job.repair_status = "none"
-            job.repair_progress = 0.0
-            job.repair_error = None
-            job.repair_clips = []
-            job.repair_active_clip = None
-            job.repair_phase = None
-            self._jobs = [j for j in self._jobs if j.job_id != job_id]
-            self._by_id.pop(job_id, None)
-            self._persist_finished()
+                for path in list(job.saved_paths):
+                    if osp.isfile(path):
+                        os.remove(path)
+                        removed.append(path)
+                    tmp_path = path + ".repair.tmp"
+                    if osp.isfile(tmp_path):
+                        os.remove(tmp_path)
+                        removed.append(tmp_path)
+                png_dir = job.preview_png_dir()
+                if osp.isdir(png_dir):
+                    shutil.rmtree(png_dir, ignore_errors=True)
+                    removed.append(png_dir)
+                out_mp4 = job.preview_mp4_path()
+                if osp.isfile(out_mp4):
+                    os.remove(out_mp4)
+                    removed.append(out_mp4)
+                repair_staging = job.repair_staging_dir()
+                if osp.isdir(repair_staging):
+                    shutil.rmtree(repair_staging, ignore_errors=True)
+                    removed.append(repair_staging)
+                for mp4 in job.repair_mp4_paths():
+                    try:
+                        os.remove(mp4)
+                        removed.append(mp4)
+                    except OSError:  # noqa: BLE001
+                        pass
+                overrides_dir = job.repair_overrides_dir()
+                if osp.isdir(overrides_dir):
+                    shutil.rmtree(overrides_dir, ignore_errors=True)
+                    removed.append(overrides_dir)
+                self._jobs = [j for j in self._jobs if j.job_id != job_id]
+                self._by_id.pop(job_id, None)
+                self._persist_finished()
+        finally:
+            if repair_lock is not None:
+                repair_lock.release()
         return {"ok": True, "removed": removed, "deleted_job_id": job_id}
 
     # ------------------------------------------------------------- frame repair
@@ -2749,7 +2766,9 @@ class SegmentationQueue:
         return img[..., 3] > 0
 
     @staticmethod
-    def _rewrite_tar_repaired_frames(tar_path, obj_staging_dir, frames, progress=None):
+    def _rewrite_tar_repaired_frames(
+        tar_path, obj_staging_dir, frames, progress=None, cancel_check=None
+    ):
         """Rebuild a result tar, replacing the given frame indices with the
         repaired pngs from obj_staging_dir (all other members copy through).
         The tar can be many GB, so report per-member copy progress when a
@@ -2768,6 +2787,8 @@ class SegmentationQueue:
             members = src_tar.getmembers()
             total = len(members) or 1
             for i, member in enumerate(members):
+                if cancel_check is not None and cancel_check():
+                    raise RepairCancelled("Repair was cancelled for deletion")
                 if member.name in replacements:
                     data = replacements[member.name]
                     new_info = tarfile.TarInfo(name=member.name)
@@ -2906,11 +2927,17 @@ class SegmentationQueue:
     def _run_repair(self, job, clips):
         """Worker thread wrapper: record ready / error on the job."""
         try:
-            self._execute_repair(job, clips)
+            with job._repair_io_lock:
+                if job.cancel_requested():
+                    raise RepairCancelled("Repair was cancelled for deletion")
+                self._execute_repair(job, clips)
             with self._lock:
                 if job.repair_status == "running":
                     job.repair_status = "ready"
                     job.repair_progress = 1.0
+        except RepairCancelled:
+            # Delete holds off cleanup until this worker releases its I/O lock.
+            return
         except Exception as err:  # noqa: BLE001
             with self._lock:
                 if job.repair_status == "running":
@@ -2984,6 +3011,8 @@ class SegmentationQueue:
                 )
                 track_done = 0
                 for clip in clips:
+                    if job.cancel_requested():
+                        raise RepairCancelled("Repair was cancelled for deletion")
                     frames = clip["frames"]
                     direction = clip["direction"]
                     min_f, max_f = frames[0], frames[-1]
@@ -2999,6 +3028,8 @@ class SegmentationQueue:
                     )
                     # re-track every object buffer from the seed frame's mask
                     for objidx in obj_idxs:
+                        if job.cancel_requested():
+                            raise RepairCancelled("Repair was cancelled for deletion")
                         obj_dir = osp.join(clip_dir, f"obj{objidx:02d}")
                         os.makedirs(obj_dir, exist_ok=True)
                         seed_mask = self._read_seed_mask_from_tar(
@@ -3025,6 +3056,8 @@ class SegmentationQueue:
                             else range(max_f, min_f - 1, -1)
                         )
                         for frame_idx in step_order:
+                            if job.cancel_requested():
+                                raise RepairCancelled("Repair was cancelled for deletion")
                             _is_paused, got_idx, frame = next(vreader)
                             if got_idx != frame_idx:
                                 raise ValueError(
@@ -3119,6 +3152,8 @@ class SegmentationQueue:
                 ) from err
             n_clips = len(clips)
             for clip in clips:
+                if job.cancel_requested():
+                    raise RepairCancelled("Repair was cancelled for deletion")
                 frames = clip["frames"]
                 min_f, max_f = frames[0], frames[-1]
                 clip_start = max(0, min_f - REPAIR_CLIP_PAD)
@@ -3134,6 +3169,8 @@ class SegmentationQueue:
                 )
                 try:
                     for i, frame_idx in enumerate(clip_frames):
+                        if job.cancel_requested():
+                            raise RepairCancelled("Repair was cancelled for deletion")
                         if min_f <= frame_idx <= max_f:
                             path = osp.join(merged_dir, f"{frame_idx:08d}.png")
                         else:
@@ -3217,6 +3254,7 @@ class SegmentationQueue:
                     progress=lambda p, i=i: self._set_repair_progress(
                         job, 0.50 * (i + p) / len(objects)
                     ),
+                    cancel_check=job.cancel_requested,
                 )
                 self._set_repair_progress(job, 0.50 * (i + 1) / len(objects))
             # the tar now holds the newer frames: drop any stale overrides
@@ -3265,6 +3303,7 @@ class SegmentationQueue:
                 progress=lambda p: self._set_repair_progress(
                     job, copy_start + encode_range * p
                 ),
+                cancel_check=job.cancel_requested,
             )
         shutil.rmtree(clip_dir, ignore_errors=True)
         clip_mp4 = job.repair_clip_mp4_path(clip_index)
@@ -3363,7 +3402,14 @@ class SegmentationQueue:
         can take a while on long videos, so the HTTP request returns right
         away and the UI tracks progress via the job snapshot."""
         try:
-            self._apply_repair(job, clip, objects, rewrite_tar)
+            with job._repair_io_lock:
+                if job.cancel_requested():
+                    raise RepairCancelled("Repair was cancelled for deletion")
+                self._apply_repair(job, clip, objects, rewrite_tar)
+        except RepairCancelled:
+            # Delete waits for this lock before removing artifacts and the job.
+            # Do not publish an error/status update for an entry that is gone.
+            return
         except Exception as err:  # noqa: BLE001
             traceback.print_exc()
             with self._lock:
