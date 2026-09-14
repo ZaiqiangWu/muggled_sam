@@ -127,6 +127,15 @@ _UPLOAD_LOCK = threading.Lock()
 #   accepted frames       : <repo>/videos/<garment>/<video_stem>/*.png
 MASK_PNG_ROOT = osp.join(_REPO_ROOT, "generated_mask_videos")
 VIDEOS_DEST_ROOT = osp.join(_REPO_ROOT, "videos")
+# Context frames on each side of the repaired range included in the repair
+# preview clip (150 frames = 5 s at the fixed 30 fps preview rate). The
+# repair preview encodes only this clip, not the whole video, so repairing
+# a few frames on a long video stays fast.
+REPAIR_CLIP_PAD = 150
+# Context frames on each side of the repaired range included in the repair
+# preview clip (150 = 5s at the fixed 30 fps preview rate). Keeps the repair
+# preview fast: only the clip is encoded, not the whole video.
+REPAIR_CLIP_PAD = 150
 # Raw segmentation results (tars / ffmpeg mp4s) written by the queue
 SAVED_FRAMES_DIR = osp.join(_REPO_ROOT, "saved_images", "run_video")
 # Finished segmentation jobs are persisted here so the task list survives
@@ -1787,6 +1796,13 @@ class SegJob:
                     self._repair_load_meta()
             if osp.isfile(self.repair_mp4_path()):
                 repair_url = f"/api/seg/repair_video?job_id={self.job_id}"
+            repair_clip = None
+            if repair_status == "ready" and self.repair_frames:
+                clip_start = max(0, self.repair_frames[0] - REPAIR_CLIP_PAD)
+                clip_end = self.repair_frames[-1] + REPAIR_CLIP_PAD
+                if self.total_frames > 0:
+                    clip_end = min(clip_end, self.total_frames - 1)
+                repair_clip = [clip_start, clip_end]
         return {
             "job_id": self.job_id,
             "kind": self.kind,
@@ -1819,6 +1835,7 @@ class SegJob:
             "repair_progress": round(self.repair_progress, 3),
             "repair_error": self.repair_error,
             "repair_frames": list(self.repair_frames),
+            "repair_clip": repair_clip,
             "repair_direction": self.repair_direction,
             "repair_url": repair_url,
         }
@@ -2922,11 +2939,20 @@ class SegmentationQueue:
                     "direction": direction,
                     "seed_frame": seed_f,
                     "objects": obj_idxs,
+                    "clip_start": clip_start,
+                    "clip_end": clip_end,
                     "created_at": time.time(),
                 }, fh)
 
-            # encode the repair preview: repaired range from staging, the rest
-            # of the video from the existing preview frames
+            # encode the repair preview: a short clip around the repaired
+            # range (repaired frames from staging, the surrounding context
+            # from the existing preview frames). Re-encoding the whole video
+            # would take minutes on long videos; the untouched full video is
+            # already available as the normal mask preview.
+            clip_pad = REPAIR_CLIP_PAD
+            clip_start = max(0, min_f - clip_pad)
+            clip_end = min(num_frames - 1, max_f + clip_pad)
+            clip_frames = list(range(clip_start, clip_end + 1))
             try:
                 import imageio  # lazy: only needed while encoding
             except ImportError as err:
@@ -2939,7 +2965,7 @@ class SegmentationQueue:
                 ffmpeg_params=["-movflags", "+faststart"],
             )
             try:
-                for frame_idx in range(num_frames):
+                for i, frame_idx in enumerate(clip_frames):
                     if min_f <= frame_idx <= max_f:
                         path = osp.join(merged_dir, f"{frame_idx:08d}.png")
                     else:
@@ -2952,7 +2978,7 @@ class SegmentationQueue:
                     out_frame[alpha == 0] = 255  # white outside the masked region
                     writer.append_data(cv2.cvtColor(out_frame, cv2.COLOR_BGR2RGB))
                     self._set_repair_progress(
-                        job, 0.6 + 0.4 * (frame_idx + 1) / num_frames
+                        job, 0.6 + 0.4 * (i + 1) / len(clip_frames)
                     )
             finally:
                 writer.close()

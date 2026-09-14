@@ -1784,8 +1784,12 @@ function openSegRepairPreview(jobId) {
   const seedText = job.repair_direction === "backward"
     ? "next frame's mask, tracked backward"
     : "previous frame's mask, tracked forward";
+  let clipText = "";
+  if (Array.isArray(job.repair_clip) && job.repair_clip.length === 2) {
+    clipText = ` Clip shows frames ${job.repair_clip[0]}-${job.repair_clip[1]}. `;
+  }
   $("seg-repair-hint").textContent =
-    `Frames ${rangeText} re-tracked from the ${seedText}. ` +
+    `Frames ${rangeText} re-tracked from the ${seedText}.` + clipText +
     "Accept rewrites the result tar(s) + preview frames; Discard keeps the original result.";
   const video = $("seg-preview-video");
   $("seg-preview-title").textContent =

@@ -233,8 +233,12 @@ Each finished job card has three buttons on the bottom right:
   with `step_video_masking` (same calls as normal tracking; the saved
   exemplar bank is kept as the prompt memory). The repaired frames are staged
   under `./generated_mask_videos/.repair_staging/<job_id>/` and encoded into
-  `./generated_mask_videos/<video_stem>_repaired_mask.mp4` — **the original
-  result files are not touched until you decide**. The button row then shows
+  `./generated_mask_videos/<video_stem>_repaired_mask.mp4` — a short clip
+  around the repaired range (the range itself plus ~5 s / 150 frames of
+  context on each side, clamped to the video), so repair stays fast even on
+  long videos; the untouched full video is the normal mask preview.
+  **The original result files are not touched until you decide**. The button
+  row then shows
   `▶ Repair` (play the repair preview in the same video dialog, which gains
   **Accept repair** / **Discard** buttons in the footer),
   **Accept repair** (rewrites the result tar(s) — replacing only the repaired
