@@ -1695,7 +1695,7 @@ async function deleteSegJob(jobId) {
   if (!ok) return;
   try {
     await api("/api/seg/delete", { method: "POST", body: { job_id: jobId } });
-    toast("Result files deleted");
+    toast("Result files and task removed");
     await pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);

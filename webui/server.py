@@ -2568,8 +2568,12 @@ class SegmentationQueue:
         return job.to_dict()
 
     def delete_artifacts(self, job_id):
-        """Delete the job's saved result files, generated frames and preview
-        mp4. Frames already accepted under ./videos/ are kept."""
+        """Delete a finished job's artifacts and remove its task entry.
+
+        Frames already accepted under ./videos/ are kept. Removing the entry
+        here (rather than leaving an empty finished job behind) also removes
+        it from the persisted server-restart history.
+        """
         with self._lock:
             job = self._by_id.get(job_id)
             if job is None:
@@ -2624,12 +2628,10 @@ class SegmentationQueue:
             job.repair_clips = []
             job.repair_active_clip = None
             job.repair_phase = None
-            job.message = (
-                f"Deleted {len(removed)} result item(s); "
-                "accepted frames under videos/ were kept"
-                if removed else "Nothing left to delete"
-            )
-        return {"ok": True, "removed": removed, "job": job.to_dict()}
+            self._jobs = [j for j in self._jobs if j.job_id != job_id]
+            self._by_id.pop(job_id, None)
+            self._persist_finished()
+        return {"ok": True, "removed": removed, "deleted_job_id": job_id}
 
     # ------------------------------------------------------------- frame repair
     # Repair for isolated flawed frames: seed a fresh tracking run from the
