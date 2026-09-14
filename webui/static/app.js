@@ -1419,7 +1419,9 @@ async function submitSegTask() {
   const promptPaths = Array.from(document.querySelectorAll("#seg-prompt-list input[type=text]"))
     .map((el) => el.value.trim())
     .filter(Boolean);
-  const video = $("seg-video").value.trim();
+  const videoPaths = Array.from(document.querySelectorAll("#seg-video-list input[type=text]"))
+    .map((el) => el.value.trim())
+    .filter(Boolean);
   const dir = $("seg-dir").value.trim();
   const hint = $("seg-submit-hint");
   hint.style.color = "var(--danger)";
@@ -1432,8 +1434,9 @@ async function submitSegTask() {
     config: readSegConfig(),
   };
   if (type === "video") {
-    if (!video) { hint.textContent = "Pick an input video"; return; }
-    body.video_path = video;
+    if (!videoPaths.length) { hint.textContent = "Pick an input video"; return; }
+    body.video_path = videoPaths[0];
+    body.video_paths = videoPaths;
   } else {
     if (!dir) { hint.textContent = "Pick a videos folder"; return; }
     body.input_dir = dir;
@@ -1593,7 +1596,7 @@ function addSegPromptRow(value) {
   browse.onclick = () => openSegBrowse("pt", input.id, input.value);
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "seg-prompt-remove";
+  remove.className = "seg-row-remove";
   remove.title = "Remove this .pt file";
   remove.textContent = "\u2715";
   remove.onclick = () => {
@@ -1611,19 +1614,100 @@ function addSegPromptRow(value) {
   return input;
 }
 
+let segVideoRowSeq = 0;
+
+function addSegVideoRow(value) {
+  const list = $("seg-video-list");
+  const row = document.createElement("div");
+  row.className = "row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = "seg-video-" + segVideoRowSeq++;
+  input.placeholder = "server path to a video file";
+  input.value = value || "";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "seg-row-remove";
+  remove.title = "Remove this video";
+  remove.textContent = "\u2715";
+  remove.onclick = () => {
+    if (list.children.length > 1) {
+      row.remove();
+    } else {
+      input.value = "";
+      input.focus();
+    }
+  };
+  row.appendChild(input);
+  row.appendChild(remove);
+  list.appendChild(row);
+  return input;
+}
+
+function addSegVideoSelection(paths) {
+  const list = $("seg-video-list");
+  const existing = new Set(
+    Array.from(list.querySelectorAll("input[type=text]")).map((el) => el.value.trim())
+  );
+  let added = 0;
+  for (const p of paths) {
+    if (existing.has(p)) continue;
+    addSegVideoRow(p);
+    existing.add(p);
+    added += 1;
+  }
+  if (added > 0) {
+    toast(`Added ${added} video${added !== 1 ? "s" : ""} to the task`);
+  }
+}
+
+function addSegPromptSelection(anchorInputId, paths) {
+  const list = $("seg-prompt-list");
+  const anchor = $(anchorInputId);
+  const rows = Array.from(list.children);
+  const anchorRow = anchor ? anchor.parentElement : null;
+  const anchorIdx = anchorRow ? rows.indexOf(anchorRow) : -1;
+  const existing = new Set(
+    rows
+      .map((r, i) => (i === anchorIdx ? "" : (r.querySelector("input") || {}).value || ""))
+      .map((v) => v.trim())
+      .filter(Boolean)
+  );
+  const chosen = (paths || []).filter((p) => !existing.has(p));
+  if (chosen.length === 0) {
+    toast("Those .pt files are already in the list", true);
+    return;
+  }
+  if (anchor) anchor.value = chosen[0];
+  let prev = anchorRow;
+  for (let i = 1; i < chosen.length; i++) {
+    const input = addSegPromptRow(chosen[i]);
+    const row = input.parentElement;
+    if (prev) list.insertBefore(row, prev.nextSibling);
+    prev = row;
+  }
+  toast(`Selected ${chosen.length} .pt file${chosen.length !== 1 ? "s" : ""}`);
+}
+
 function openSegBrowse(kind, targetId, startPath) {
   segBrowseCtx = {
     kind, targetId,
     currentPath: (startPath && startPath.endsWith("/")) ? startPath :
       (startPath ? startPath.replace(/\/[^\/]*$/, "") : ""),
     sel: null,
+    selSet: new Set(),   // multi-select (video kind): selected file paths
+    anchor: null,        // index into ctx.files of the last plain/toggled file
+    files: [],           // file entries in display order (for Shift ranges)
   };
   const titles = {
-    pt: "Pick a prompt file (.pt)",
-    video: "Pick a video file",
+    pt: "Pick prompt file(s) (.pt)",
+    video: "Pick video files",
     dir: "Pick a videos folder",
   };
   $("seg-browse-title").textContent = titles[kind] || "Browse";
+  $("seg-browse-hint").textContent = kind === "dir"
+    ? "Single click: select \u00b7 Double click: open folder / confirm"
+    : "Single click: select \u00b7 Shift+click: select a range \u00b7 \u2318+click: toggle one file \u00b7 Double click: open folder";
   $("seg-browse-dialog").style.display = "flex";
   loadSegDir(kind, segBrowseCtx.currentPath).catch((e) => toast(e.message, true));
 }
@@ -1638,26 +1722,87 @@ async function loadSegDir(kind, path) {
   $("seg-browse-input").value = res.path;
   if (segBrowseCtx) segBrowseCtx.currentPath = res.path;
   if (segBrowseCtx) segBrowseCtx.sel = null;
+  if (segBrowseCtx && kind !== "dir") {
+    segBrowseCtx.selSet = new Set();
+    segBrowseCtx.anchor = null;
+    segBrowseCtx.files = [];
+  }
+  const multi = kind !== "dir" && !!segBrowseCtx;
+
+  function refreshBrowseSelection() {
+    if (!multi) return;
+    list.querySelectorAll(".dir-entry.file.selected").forEach((el) => el.classList.remove("selected"));
+    segBrowseCtx.files.forEach((f) => {
+      if (segBrowseCtx.selSet.has(f.fullPath)) f.el.classList.add("selected");
+    });
+    const label = $("seg-browse-selected");
+    const names = Array.from(segBrowseCtx.selSet);
+    if (names.length > 0) {
+      label.textContent = names.length + " file" + (names.length !== 1 ? "s" : "") + " selected";
+      label.title = names.join("\n");
+    } else {
+      label.textContent = "nothing selected";
+      label.title = "";
+    }
+  }
 
   const addEntry = (icon, name, isDir, fullPath) => {
     const div = document.createElement("div");
     div.className = "dir-entry" + (isDir ? " dir" : " file");
     div.innerHTML = `<span class="icon">${icon}</span>${escHtml(name)}`;
-    // Single click only selects (folders included); double click always
-    // opens a folder. A folder is chosen only via single-click + Select.
-    div.onclick = () => {
-      segBrowseCtx.sel = fullPath;
-      list.querySelectorAll(".dir-entry.selected").forEach((el) => el.classList.remove("selected"));
-      div.classList.add("selected");
-      $("seg-browse-selected").textContent = fullPath;
-    };
-    div.ondblclick = () => {
-      if (isDir) {
+    if (isDir) {
+      // Folders: single click only highlights (or picks, for the dir kind);
+      // double click opens. In multi-select mode the file selection is
+      // untouched.
+      div.onclick = () => {
+        list.querySelectorAll(".dir-entry.selected").forEach((el) => el.classList.remove("selected"));
+        div.classList.add("selected");
+        if (!multi) {
+          segBrowseCtx.sel = fullPath;
+          $("seg-browse-selected").textContent = fullPath;
+          $("seg-browse-selected").title = "";
+        } else {
+          refreshBrowseSelection();
+        }
+      };
+      div.ondblclick = () => {
         loadSegDir(kind, fullPath).catch((e) => toast(e.message, true));
-      } else {
+      };
+    } else if (multi) {
+      const fileIndex = segBrowseCtx.files.length;
+      segBrowseCtx.files.push({ fullPath, el: div });
+      div.onclick = (evt) => {
+        if (evt.shiftKey && segBrowseCtx.anchor !== null) {
+          const lo = Math.min(segBrowseCtx.anchor, fileIndex);
+          const hi = Math.max(segBrowseCtx.anchor, fileIndex);
+          for (let i = lo; i <= hi; i++) {
+            segBrowseCtx.selSet.add(segBrowseCtx.files[i].fullPath);
+          }
+        } else if (evt.metaKey || evt.ctrlKey) {
+          if (segBrowseCtx.selSet.has(fullPath)) segBrowseCtx.selSet.delete(fullPath);
+          else segBrowseCtx.selSet.add(fullPath);
+          segBrowseCtx.anchor = fileIndex;
+        } else {
+          segBrowseCtx.selSet.clear();
+          segBrowseCtx.selSet.add(fullPath);
+          segBrowseCtx.anchor = fileIndex;
+        }
+        refreshBrowseSelection();
+      };
+      // In multi-select mode double-clicking a file does not confirm (it
+      // would reset the selection to that single file); use Select instead.
+    } else {
+      // Single click only selects; double click confirms the file.
+      div.onclick = () => {
+        segBrowseCtx.sel = fullPath;
+        list.querySelectorAll(".dir-entry.selected").forEach((el) => el.classList.remove("selected"));
+        div.classList.add("selected");
+        $("seg-browse-selected").textContent = fullPath;
+      };
+      div.ondblclick = () => {
         confirmSegBrowse();
-      }
-    };
+      };
+    }
     list.appendChild(div);
   };
 
@@ -1672,6 +1817,26 @@ async function loadSegDir(kind, path) {
 function confirmSegBrowse() {
   const ctx = segBrowseCtx;
   if (!ctx) return;
+  if (ctx.kind === "video") {
+    if (!ctx.selSet || ctx.selSet.size === 0) {
+      toast("Select at least one video file", true);
+      return;
+    }
+    addSegVideoSelection(Array.from(ctx.selSet));
+    $("seg-browse-dialog").style.display = "none";
+    ctx.selSet = new Set();
+    return;
+  }
+  if (ctx.kind === "pt") {
+    if (!ctx.selSet || ctx.selSet.size === 0) {
+      toast("Select at least one .pt file", true);
+      return;
+    }
+    addSegPromptSelection(ctx.targetId, Array.from(ctx.selSet));
+    $("seg-browse-dialog").style.display = "none";
+    ctx.selSet = new Set();
+    return;
+  }
   let val;
   if (ctx.kind === "dir") {
     val = ctx.sel || ctx.currentPath;
@@ -1698,7 +1863,12 @@ function wireSeg() {
   $("seg-submit").onclick = () => submitSegTask();
   addSegPromptRow();
   $("seg-prompt-add").onclick = () => addSegPromptRow();
-  $("seg-video-browse").onclick = () => openSegBrowse("video", "seg-video", $("seg-video").value);
+  addSegVideoRow();
+  $("seg-video-browse").onclick = () => {
+    const first = document.querySelector("#seg-video-list input[type=text]");
+    openSegBrowse("video", "seg-video-list", first ? first.value : "");
+  };
+  $("seg-video-add").onclick = () => addSegVideoRow();
   $("seg-dir-browse").onclick = () => openSegBrowse("dir", "seg-dir", $("seg-dir").value);
   $("seg-clear-all").onclick = () => clearSegAll();
 

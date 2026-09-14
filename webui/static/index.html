@@ -191,7 +191,7 @@
             <div class="row">
               <label>Task type
                 <select id="seg-type">
-                  <option value="video">Single video</option>
+                  <option value="video">Specific videos</option>
                   <option value="dir">Video folder</option>
                 </select>
               </label>
@@ -207,10 +207,12 @@
             </div>
 
             <div class="seg-field" id="seg-video-field">
-              <span class="seg-label">Input video</span>
-              <div class="row">
-                <input type="text" id="seg-video" placeholder="server path to a video file">
-                <button id="seg-video-browse">Browse</button>
+              <span class="seg-label">Input videos (specific files)</span>
+              <div id="seg-video-list"></div>
+              <div class="row" style="margin-top:4px">
+                <button id="seg-video-browse" type="button">Browse</button>
+                <button id="seg-video-add" type="button">+ Add video</button>
+                <span class="hint">Browse: Shift+click a range, &#8984;/Ctrl+click multiple files; selections are added to the list. &#10005; removes one.</span>
               </div>
             </div>
 
@@ -346,7 +348,7 @@
   <div id="seg-browse-dialog" class="modal" style="display:none">
     <div class="modal-card">
       <h2 id="seg-browse-title">Browse (on this server)</h2>
-      <div class="hint">Single click: select &middot; Double click: open folder / confirm</div>
+      <div class="hint" id="seg-browse-hint">Single click: select &middot; Double click: open folder / confirm</div>
       <div class="row">
         <input type="text" id="seg-browse-input" size="48">
         <button id="seg-browse-refresh">Refresh</button>

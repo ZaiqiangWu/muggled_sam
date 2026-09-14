@@ -425,8 +425,8 @@ input[type="range"] { width: 100%; }
 .seg-field .row { width: 100%; }
 .seg-field input[type="text"] { flex: 1; min-width: 0; direction: rtl; text-align: left; }
 #seg-prompt-list { display: flex; flex-direction: column; gap: 4px; }
-.seg-prompt-remove { padding: 5px 8px; color: var(--muted); }
-.seg-prompt-remove:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.seg-row-remove { padding: 5px 8px; color: var(--muted); }
+.seg-row-remove:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
 
 .seg-queue-list {
   display: flex;

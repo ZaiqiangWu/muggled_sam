@@ -1949,11 +1949,13 @@ class SegmentationQueue:
 
     # ------------------------------------------------------------- submission
     def submit(self, kind, prompt_path=None, video_path=None, input_dir=None,
-               config=None, prompt_paths=None):
+               config=None, prompt_paths=None, video_paths=None):
         """Queue a segmentation task. kind: 'video' or 'dir'. Returns created jobs.
 
         ``prompt_paths`` may list several .pt files (all describing the same
         object(s)); they are merged into one exemplar bank before running.
+        ``video_paths`` may list several specific video files; each becomes
+        its own job (several are grouped as one batch).
         """
         if isinstance(prompt_paths, str):
             prompt_paths = [prompt_paths]
@@ -1976,19 +1978,43 @@ class SegmentationQueue:
             batch_id = None
             created = []
             if kind == "video":
-                if not video_path or not str(video_path).strip():
-                    raise ValueError("A video file path is required for a single-video task")
-                vpath = self._resolve_path(str(video_path))
-                if osp.isdir(vpath):
-                    raise IsADirectoryError(f"That is a folder, not a video file: {vpath}")
-                if not osp.isfile(vpath):
-                    raise FileNotFoundError(f"Video file not found: {vpath}")
-                job = SegJob(
-                    job_id=self._next_id("j"), kind="video", prompt_path=prompt_path,
-                    video_path=vpath, config=cfg, prompt_paths=resolved_paths,
+                if isinstance(video_paths, str):
+                    video_paths = [video_paths]
+                raw_videos = (
+                    list(video_paths) if video_paths else ([video_path] if video_path else [])
                 )
-                self._register(job)
-                created.append(job)
+                raw_videos = [str(v).strip() for v in raw_videos if v and str(v).strip()]
+                if not raw_videos:
+                    raise ValueError("A video file path is required for a specific-videos task")
+                resolved_videos = []
+                for raw in raw_videos:
+                    vpath = self._resolve_path(raw)
+                    if osp.isdir(vpath):
+                        raise IsADirectoryError(f"That is a folder, not a video file: {vpath}")
+                    if not osp.isfile(vpath):
+                        raise FileNotFoundError(f"Video file not found: {vpath}")
+                    if vpath not in resolved_videos:
+                        resolved_videos.append(vpath)
+                if len(resolved_videos) == 1:
+                    job = SegJob(
+                        job_id=self._next_id("j"), kind="video", prompt_path=prompt_path,
+                        video_path=resolved_videos[0], config=cfg,
+                        prompt_paths=resolved_paths,
+                    )
+                    self._register(job)
+                    created.append(job)
+                else:
+                    batch_id = self._next_id("b")
+                    batch_label = f"selected videos ({len(resolved_videos)})"
+                    for vpath in resolved_videos:
+                        job = SegJob(
+                            job_id=self._next_id("j"), kind="video", prompt_path=prompt_path,
+                            video_path=vpath, config=cfg,
+                            batch_id=batch_id, batch_label=batch_label,
+                            prompt_paths=resolved_paths,
+                        )
+                        self._register(job)
+                        created.append(job)
             elif kind == "dir":
                 if not input_dir or not str(input_dir).strip():
                     raise ValueError("A videos folder path is required for a folder task")
@@ -3187,6 +3213,7 @@ class Handler(BaseHTTPRequestHandler):
                 prompt_path=body.get("prompt_path"),
                 prompt_paths=body.get("prompt_paths"),
                 video_path=body.get("video_path"),
+                video_paths=body.get("video_paths"),
                 input_dir=body.get("input_dir"),
                 config=body.get("config"),
             )

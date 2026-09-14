@@ -140,22 +140,30 @@ a **New segmentation task** form (left) and a **Task queue** (right).
 
 Pick a **Task type**:
 
-- **Single video** — equivalent to
-  `python load_prompts_run_video.py --prompt_path <pt> --input_video <video>`.
-  Use **Browse** to pick the server-side **Prompt file (.pt)** and the
-  **Input video**.
+- **Specific videos** — pick one or more specific video files; each selected
+  video becomes its own job (several are grouped as one batch). Use **Browse**
+  to pick the prompt file(s) and the videos. In the video browser: single
+  click selects, **Shift+click** selects a contiguous range, and
+  **⌘/Ctrl+click** toggles additional non-contiguous files. Selected videos
+  appear one per row (each with a ✕ to remove it); **+ Add video** adds an
+  empty row for manual entry. Equivalent to running
+  `python load_prompts_run_video.py --prompt_path <pt> --input_video <video>`
+  once per selected video.
 - **Video folder** — equivalent to
   `python load_prompts_run_dir.py --prompt_path <pt> --input_dir <dir>`.
   Use **Browse** to pick the **Prompt file (.pt)** and the **Videos folder**.
   The folder's top-level `*.mp4` files are each queued as their own job (same
   as the script, which runs the per-video script on each clip).
 
-**Multiple prompt files**: use **+ Add another .pt** to attach more .pt files
-(e.g. the same object authored from different videos). All listed files must
-describe the same object(s); their exemplar banks are merged into one bank
-before segmentation (each file's stale prevframe history is dropped, and the
-merged bank is capped at the 32 prompt-memory limit). The task bar then shows
-a `N × .pt merged` chip.
+**Multiple prompt files**: attach more .pt files (e.g. the same object
+authored from different videos) via the per-row **Browse** or **+ Add
+another .pt**. The prompt browser supports single click, **Shift+click**
+(contiguous range) and **⌘/Ctrl+click** (toggle); the first selected file
+fills the row you browsed from and the rest are inserted as new rows after it
+(duplicates skipped). All listed files must describe the same object(s);
+their exemplar banks are merged into one bank before segmentation (each
+file's stale prevframe history is dropped, and the merged bank is capped at
+the 32 prompt-memory limit). The task bar then shows a `N × .pt merged` chip.
 
 The **Settings** dropdown exposes the relevant `load_prompts_run_video.py`
 parameters: model path, device, base size, num buffers, background color,
@@ -227,9 +235,10 @@ output layout as the script.
 ### Segmentation API
 
 - `GET  /api/seg/queue` — queue + counts + progress
-- `POST /api/seg/submit` — `{kind, prompt_path, prompt_paths?, video_path|input_dir, config}`;
+- `POST /api/seg/submit` — `{kind, prompt_path, prompt_paths?, video_path|video_paths|input_dir, config}`;
   `prompt_paths` is a list of .pt files of the same object whose exemplar
-  banks are merged (legacy single-`prompt_path` still works)
+  banks are merged, and `video_paths` is a list of specific video files
+  (one job each; legacy single-`prompt_path`/`video_path` still works)
 - `POST /api/seg/cancel` — `{job_id}`
 - `POST /api/seg/clear` — **Clear all**: remove finished jobs + wipe all
   generated artifacts (clear_all.sh equivalent)
