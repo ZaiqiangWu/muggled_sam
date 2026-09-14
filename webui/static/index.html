@@ -384,15 +384,16 @@
            seed direction, then start the repair -->
       <div class="video-modal-foot" id="seg-repair-pick" style="display:none">
         <button id="seg-repair-set-a" title="Set point A at the playhead (or press A)">Set A</button>
-        <button id="seg-repair-set-b" title="Set point B at the playhead (or press B)">Set B</button>
+        <button id="seg-repair-set-b" title="Set point B at the playhead (or press B) - also adds the clip">Set B</button>
         <span class="hint" id="seg-repair-cursor"></span>
         <span class="hint" id="seg-repair-range-hint"></span>
-        <label class="hint"><input type="radio" name="seg-repair-dir" value="forward" checked> Previous frame's mask as seed, track forward</label>
-        <label class="hint"><input type="radio" name="seg-repair-dir" value="backward"> Next frame's mask as seed, track backward</label>
         <span class="spacer"></span>
         <button id="seg-repair-start" class="primary" disabled>Start repair</button>
       </div>
+      <div id="seg-repair-clips" class="seg-repair-clips" style="display:none"></div>
       <div class="video-modal-foot" id="seg-repair-actions" style="display:none">
+        <select id="seg-repair-clip-sel" class="seg-clip-sel"
+          title="Switch between the pending repair clips"></select>
         <span class="hint" id="seg-repair-hint"></span>
         <span class="spacer"></span>
         <label class="hint" id="seg-repair-tar-opt"

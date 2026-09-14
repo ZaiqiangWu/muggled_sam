@@ -212,53 +212,64 @@ Each finished job card has three buttons on the bottom right:
   `util/multithread_video_writer.py`).
 - **Repair** — for isolated flawed frames (the mask breaks on a frame or
   short range, then tracking recovers). Opens the preview video with an
-  **A/B point picker**: play or scrub to the start of the flawed range and
+  **A/B point picker**: play or scrub to the start of a flawed range and
   press **Set A** (keyboard `A`), then press **Set B** (keyboard `B`) at the
-  end of the range — A and B on the same frame = single-frame repair; if the
-  preview is not ready yet it is queued automatically. Pick a direction:
+  end of the range — A and B on the same frame = single-frame repair; once
+  both points are set the range is committed as a **clip** (shown as a chip
+  under the picker). Repeat Set A / Set B to add more clips — **several
+  clips can be selected at once** (they must not overlap or even touch, and
+  are sorted by start frame); each chip has its own direction dropdown and a
+  ✕ button to remove it; if the preview is not ready yet it is queued
+  automatically. Per clip, pick a direction:
   - **forward** — the mask of the frame right before the range is used as the
     seed; the range is re-tracked forward from it;
   - **backward** — the mask of the frame right after the range is used as the
     seed; the range is re-tracked backward from it.
-  A direction that has no seed frame is grayed out: if A is the first frame
-  (0), **forward** is unavailable; if B is the last frame, **backward** is
-  unavailable — the picker switches to the remaining direction automatically.
-  Then **Start repair**. The preview mp4 is encoded at 30 fps with exactly
-  one frame per mask frame, so the progress bar maps 1:1 to 0-based mask
-  frame indices (the current frame under the playhead is shown next to the
-  Set A / Set B buttons).
+  A direction that has no seed frame is grayed out: if a clip starts at the
+  first frame (0), **forward** is unavailable; if a clip ends at the last
+  frame, **backward** is unavailable — the picker switches to the remaining
+  direction automatically. Then **Start repair**. The preview mp4 is encoded
+  at 30 fps with exactly one frame per mask frame, so the progress bar maps
+  1:1 to 0-based mask frame indices (the current frame under the playhead is
+  shown next to the Set A / Set B buttons).
 
-  Mechanically this seeds a fresh tracking run with
-  `initialize_from_mask(encoded_seed_frame, saved_mask)` and steps the range
+  Mechanically each clip seeds a fresh tracking run with
+  `initialize_from_mask(encoded_seed_frame, saved_mask)` and steps its range
   with `step_video_masking` (same calls as normal tracking; the saved
-  exemplar bank is kept as the prompt memory). The repaired frames are staged
-  under `./generated_mask_videos/.repair_staging/<job_id>/` and encoded into
-  `./generated_mask_videos/<video_stem>_repaired_mask.mp4` — a short clip
-  around the repaired range (the range itself plus ~5 s / 150 frames of
-  context on each side, clamped to the video), so repair stays fast even on
-  long videos; the untouched full video is the normal mask preview.
-  **The original result files are not touched until you decide**. The button
-  row then shows
-  `▶ Repair` (play the repair preview in the same video dialog, which gains
-  **Accept repair** / **Discard** buttons in the footer),
-  **Accept repair** (applies the repair in the background — overwriting the
-  generated preview frames and re-encoding the preview mp4; the job can
-  afterwards be Accepted to `./videos/` as usual), and
-  **Discard** (staging + repair mp4 are deleted, original results kept as-is).
+  exemplar bank is kept as the prompt memory; the model/banks are loaded once
+  for the whole repair). Repaired frames are staged under
+  `./generated_mask_videos/.repair_staging/<job_id>/clipNN/` and each clip is
+  encoded into its own short preview
+  `./generated_mask_videos/<video_stem>_repaired_mask_cNN.mp4` — the clip's
+  range plus ~5 s / 150 frames of context on each side, clamped to the video,
+  so repair stays fast even on long videos; the untouched full video is the
+  normal mask preview.
+  **The original result files are not touched until you decide**. After the
+  tracking pass finishes, the button row shows **one `▶ <range>` button per
+  clip**; pressing it plays that clip's preview in the same video dialog,
+  which gains an **Accept repair** / **Discard** footer (a clip dropdown
+  appears when several clips are pending). **Each clip is decided
+  independently**:
+  - **Accept repair** (applies that clip's repair in the background —
+    overwriting the generated preview frames and re-encoding the preview mp4;
+    the job can afterwards be Accepted to `./videos/` as usual);
+  - **Discard** (that clip's staging + preview mp4 are deleted, the original
+    frames are kept as-is).
+  A green `repaired: …` chip lists the frames already accepted.
   By default the **result tar(s) are left unchanged** (skipping the slow
   multi-GB copy); the footer's "Also update result tar (slow)" checkbox makes
-  the apply step re-copy the tar(s) so they contain the repaired frames too
-  (the job-row Accept repair always takes the fast path). When the tar is
-  skipped, the repaired frames are kept as per-job overrides and re-applied
-  whenever the preview is regenerated from the tar(s), so the preview never
-  regresses to the flawed frames. While applying, the button row is replaced
-  by a progress ring (`Applying N%`) and Accept / Discard are unavailable;
-  the ring's tooltip shows the current stage — the repaired frames are copied
-  into the preview frames, then the full preview mp4 is re-encoded (plus the
-  tar re-copy first, ~0–50%, when the checkbox is on), with per-stage
-  progress reported throughout. If the apply step fails, the pending repair
-  is kept (with the error shown) so Accept can be retried. A
-  `pending: …` / `repaired: …` chip shows the affected frames.
+  the apply step re-copy the tar(s) so they contain the repaired frames too.
+  When the tar is skipped, the repaired frames are kept as per-job overrides
+  and re-applied whenever the preview is regenerated from the tar(s), so the
+  preview never regresses to the flawed frames. While applying, the button
+  row shows a progress ring (`Applying N%`) for that clip and Accept /
+  Discard are unavailable; the ring's tooltip shows the current stage — the
+  repaired frames are copied into the preview frames, then the full preview
+  mp4 is re-encoded (plus the tar re-copy first, ~0–50%, when the checkbox
+  is on), with per-stage progress reported throughout. If the apply step
+  fails, the pending clip is kept (with the error shown) so Accept can be
+  retried. The pending/accepted repair state survives server restarts (kept
+  in the staging `meta.json`).
   Tracking-mode jobs only (not pure_text), and not available once the mask
   frames have been accepted.
 - **Accept** — moves the generated frames to `./videos/<garment>/<video_stem>/`
@@ -299,12 +310,16 @@ output layout as the script.
   generation; returns `queued: true` when the job waits behind another
   preview
 - `GET  /api/seg/preview_video?job_id=` — stream the preview mp4 (Range-aware)
-- `POST /api/seg/repair` — `{job_id, frames, direction: forward|backward}`
-  start a frame repair (runs in the background; progress in the job poll)
-- `GET  /api/seg/repair_video?job_id=` — stream the repair preview mp4 (Range-aware)
-- `POST /api/seg/repair/accept` — `{job_id}` rewrite the result tar(s) +
-  preview frames with the repaired result
-- `POST /api/seg/repair/discard` — `{job_id}` throw away the pending repair
+- `POST /api/seg/repair` — `{job_id, clips: [{frames, direction:
+  forward|backward}, …]}` start a frame repair for one or more clips (runs in
+  the background; per-clip previews appear in the job poll)
+- `GET  /api/seg/repair_video?job_id=&clip=N` — stream clip N's repair
+  preview mp4 (Range-aware)
+- `POST /api/seg/repair/accept` — `{job_id, clip: N, rewrite_tar: false}`
+  apply clip N's repair: preview frames (+ preview mp4) always, tar(s) only
+  when `rewrite_tar` is true
+- `POST /api/seg/repair/discard` — `{job_id, clip: N}` throw away clip N's
+  pending repair
 - `POST /api/seg/accept` — `{job_id}` move frames to `./videos/<garment>/<name>/`
 - `POST /api/seg/delete` — `{job_id}` delete the job's result artifacts
 

@@ -45,7 +45,10 @@ const state = {
   dirSelectedIsDir: null,
   segJobs: [],        // last segmentation queue snapshot (for button handlers)
   segRepairJobId: null, // job whose repair picker / repair preview is open
-  segRepairPick: null,  // { jobId, a, b }: A/B points set on the preview bar
+  // { jobId, a, b, clips: [{s, e, direction}] }: A/B draft points +
+  // committed clips set on the preview bar
+  segRepairPick: null,
+  segRepairClipIdx: null,  // clip index shown in the repair preview dialog
   segRepairAccepting: false, // accept request in flight (client-side guard)
 };
 
@@ -1277,14 +1280,32 @@ function fmtRepairFrames(frames) {
   return parts.join(", ");
 }
 
+// "130" or "130-135" from a clip entry's [s, e] range
+function segClipRangeText(clip) {
+  if (clip && Array.isArray(clip.range) && clip.range.length === 2) {
+    return clip.range[0] === clip.range[1]
+      ? String(clip.range[0])
+      : `${clip.range[0]}-${clip.range[1]}`;
+  }
+  return "?";
+}
+
 function segRepairHtml(job) {
   const id = escHtml(job.job_id);
   const st = job.repair_status || "none";
+  const clips = Array.isArray(job.repair_clips) ? job.repair_clips : [];
+  const pending = clips.filter((c) => c.status === "pending");
+  const accepted = clips.filter((c) => c.status === "accepted");
+  const acceptedText = fmtRepairFrames(accepted.flatMap((c) => c.frames || []));
+  const acceptedChip = accepted.length
+    ? `<span class="seg-repair-chip ok"
+        title="Frame repair applied (preview frames + preview mp4 rewritten): ${escHtml(acceptedText)}">repaired: ${escHtml(acceptedText)}</span>`
+    : "";
   if (st === "running") {
     const p = Math.max(0, Math.min(1, job.repair_progress || 0));
     const off = (RING_CIRC * (1 - p)).toFixed(2);
     return `<button class="seg-repair running" data-id="${id}" disabled
-      title="Re-tracking the repaired frame range from the seed frame's mask...">
+      title="Re-tracking each clip from its seed frame's saved mask...">
       <svg class="seg-ring" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
         <circle class="seg-ring-bg" cx="10" cy="10" r="8"></circle>
         <circle class="seg-ring-fg" cx="10" cy="10" r="8"
@@ -1296,10 +1317,12 @@ function segRepairHtml(job) {
   if (st === "accepting") {
     const p = Math.max(0, Math.min(1, job.repair_progress || 0));
     const off = (RING_CIRC * (1 - p)).toFixed(2);
-    const rangeText = fmtRepairFrames(job.repair_frames);
+    const active = clips.find((c) => c.index === job.repair_active_clip)
+      || pending[0] || clips[0];
+    const rangeText = active ? segClipRangeText(active) : "";
     const phaseTitle = job.repair_phase
       ? escHtml(job.repair_phase)
-      : "Applying the repair: the result tar(s) + preview frames are being rewritten...";
+      : "Applying the repair: the preview frames + preview mp4 are being rewritten...";
     return `
       <button class="seg-repair running" data-id="${id}" disabled
         title="${phaseTitle}">
@@ -1310,27 +1333,20 @@ function segRepairHtml(job) {
         </svg>
         <span>Applying ${Math.round(p * 100)}%</span>
       </button>
-      <span class="seg-repair-chip" title="Repair in progress (result files are being rewritten): ${escHtml(rangeText)}">applying: ${escHtml(rangeText)}</span>`;
+      <span class="seg-repair-chip" title="Repair clip in progress (result files are being rewritten): ${escHtml(rangeText)}">applying: ${escHtml(rangeText)}</span>`;
   }
-  if (st === "ready") {
-    const rangeText = fmtRepairFrames(job.repair_frames);
-    return `
-      <button class="seg-repair-preview" data-id="${id}"
-        title="Play the repaired mask preview (original result files are unchanged yet)">&#x25B6; Repair</button>
-      <button class="seg-repair-accept primary" data-id="${id}"
-        title="Rewrite the result tar(s) + preview frames with the repaired result">Accept repair</button>
-      <button class="seg-repair-discard danger" data-id="${id}"
-        title="Throw away the pending repair (original results are kept)">Discard</button>
-      <span class="seg-repair-chip" title="Pending repair (not applied yet): ${escHtml(rangeText)}">pending: ${escHtml(rangeText)}</span>`;
+  if (pending.length) {
+    let html = pending.map((c) => `
+      <button class="seg-repair-preview" data-id="${id}" data-clip="${c.index}"
+        title="Play the repaired preview for frames ${escHtml(segClipRangeText(c))} - then Accept or Discard this clip in the dialog">&#x25B6; ${escHtml(segClipRangeText(c))}</button>`).join("");
+    html += `<span class="seg-repair-chip"
+      title="Pending repair clips (not applied yet): ${escHtml(pending.map(segClipRangeText).join(", "))}">pending: ${escHtml(pending.map(segClipRangeText).join(", "))}</span>`;
+    html += acceptedChip;
+    return html;
   }
-  if (st === "accepted") {
-    const rangeText = fmtRepairFrames(job.repair_frames);
-    return `<span class="seg-repair-chip ok"
-      title="Frame repair applied (result tar(s) + preview frames rewritten): ${escHtml(rangeText)}">repaired: ${escHtml(rangeText)}</span>`;
-  }
-  if (job.accepted || !job.has_tars) return "";
+  if (job.accepted || !job.has_tars) return acceptedChip;
   return `<button class="seg-repair-open" data-id="${id}"
-    title="Repair isolated flawed frames: opens the preview video to set A/B points on the progress bar for the flawed range (A=B = single frame), pick a seed direction, then accept or discard the result">Repair</button>`;
+    title="Repair isolated flawed frames: opens the preview video to set A/B points on the progress bar; each A/B pair becomes one repair clip that can be accepted or discarded separately">Repair</button>${acceptedChip}`;
 }
 
 function segJobHtml(job) {
@@ -1474,13 +1490,8 @@ function renderSegQueue(data) {
     btn.onclick = () => openSegRepairPicker(btn.dataset.id);
   });
   list.querySelectorAll(".seg-repair-preview").forEach((btn) => {
-    btn.onclick = () => openSegRepairPreview(btn.dataset.id);
-  });
-  list.querySelectorAll(".seg-repair-accept").forEach((btn) => {
-    btn.onclick = () => acceptSegRepair(btn.dataset.id);
-  });
-  list.querySelectorAll(".seg-repair-discard").forEach((btn) => {
-    btn.onclick = () => discardSegRepair(btn.dataset.id);
+    btn.onclick = () =>
+      openSegRepairPreview(btn.dataset.id, +(btn.dataset.clip || 0));
   });
   list.querySelectorAll(".seg-delete").forEach((btn) => {
     btn.onclick = () => deleteSegJob(btn.dataset.id);
@@ -1644,9 +1655,11 @@ function closeSegPreview() {
   video.removeAttribute("src");
   video.load(); // stop downloading
   $("seg-repair-pick").style.display = "none";
+  $("seg-repair-clips").style.display = "none";
   $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "none";
   state.segRepairPick = null;
+  state.segRepairClipIdx = null;
 }
 
 async function acceptSegJob(jobId) {
@@ -1696,16 +1709,17 @@ function openSegRepairPicker(jobId) {
     return;
   }
   state.segRepairJobId = jobId;
-  state.segRepairPick = { jobId, a: null, b: null };
-  const fwd = document.querySelector('input[name="seg-repair-dir"][value="forward"]');
-  if (fwd) fwd.checked = true;
+  state.segRepairClipIdx = null;
+  state.segRepairPick = { jobId, a: null, b: null, clips: [] };
   const video = $("seg-preview-video");
   $("seg-preview-title").textContent =
     `Repair range \u00b7 ${job.label || job.job_id}`;
   video.src = job.preview_url;
   $("seg-repair-pick").style.display = "flex";
+  $("seg-repair-clips").style.display = "flex";
   $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "flex";
+  renderSegRepairClips();
   updateSegRepairPickUi();
   video.play().catch(() => { /* user can press play manually */ });
 }
@@ -1723,7 +1737,76 @@ function setSegRepairPoint(which) {
   const pick = state.segRepairPick;
   if (!pick) return;
   pick[which] = segRepairCursorFrame();
+  if (pick.a != null && pick.b != null) commitDraftClip();
+  renderSegRepairClips();
   updateSegRepairPickUi();
+}
+
+// The draft A/B pair becomes a committed clip (B auto-commits the range;
+// a lone A stays a draft = single-frame clip until Start).
+function commitDraftClip() {
+  const pick = state.segRepairPick;
+  if (!pick || pick.a == null || pick.b == null) return;
+  const job = findSegJob(pick.jobId);
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  const s = Math.min(pick.a, pick.b);
+  const e = Math.max(pick.a, pick.b);
+  pick.a = null;
+  pick.b = null;
+  const overlap = pick.clips.find((c) => !(e < c.s || s > c.e));
+  if (overlap) {
+    toast(`Frames ${s}-${e} overlap the selected clip ${overlap.s}-${overlap.e}`, true);
+    return;
+  }
+  let direction = "forward";
+  if (total > 0 && s === 0) direction = "backward";
+  pick.clips.push({ s, e, direction });
+}
+
+// Render the committed-clip chips (each with a direction select + remove).
+function renderSegRepairClips() {
+  const box = $("seg-repair-clips");
+  if (!box) return;
+  const pick = state.segRepairPick;
+  if (!pick) { box.innerHTML = ""; return; }
+  const job = findSegJob(pick.jobId);
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  const items = pick.clips.map((c, i) => {
+    const noFwd = total > 0 && c.s === 0; // no saved frame before the clip
+    const noBwd = total > 0 && c.e === total - 1; // no saved frame after
+    const dir = noFwd ? "backward" : noBwd ? "forward" : c.direction;
+    c.direction = dir;
+    const rangeText = c.s === c.e ? String(c.s) : `${c.s}\u2013${c.e}`;
+    return `<span class="seg-repair-clip">
+      <b>${escHtml(rangeText)}</b>
+      <select class="seg-clip-dir" data-clip-idx="${i}"
+        title="Seed direction for this clip">
+        <option value="forward" ${dir === "forward" ? "selected" : ""}
+          ${noFwd ? "disabled" : ""}>forward</option>
+        <option value="backward" ${dir === "backward" ? "selected" : ""}
+          ${noBwd ? "disabled" : ""}>backward</option>
+      </select>
+      <button class="seg-clip-del" data-clip-idx="${i}"
+        title="Remove this clip">&#x2715;</button>
+    </span>`;
+  }).join("");
+  box.innerHTML = items;
+  box.querySelectorAll(".seg-clip-dir").forEach((sel) => {
+    sel.onchange = () => {
+      const pk = state.segRepairPick;
+      if (!pk) return;
+      pk.clips[+sel.dataset.clipIdx].direction = sel.value;
+    };
+  });
+  box.querySelectorAll(".seg-clip-del").forEach((btn) => {
+    btn.onclick = () => {
+      const pk = state.segRepairPick;
+      if (!pk) return;
+      pk.clips.splice(+btn.dataset.clipIdx, 1);
+      renderSegRepairClips();
+      updateSegRepairPickUi();
+    };
+  });
 }
 
 function updateSegRepairPickUi() {
@@ -1731,64 +1814,66 @@ function updateSegRepairPickUi() {
   if (!pick) return;
   const job = findSegJob(pick.jobId);
   const total = job && job.total_frames > 0 ? job.total_frames : 0;
-  const fwd = document.querySelector('input[name="seg-repair-dir"][value="forward"]');
-  const bwd = document.querySelector('input[name="seg-repair-dir"][value="backward"]');
   let hint;
   if (pick.a == null) {
     hint =
-      "Play/scrub to a flawed frame, then press Set A (key A); press Set B " +
-      "(key B) to widen the range (A=B = single frame).";
-    if (fwd) fwd.disabled = false;
-    if (bwd) bwd.disabled = false;
+      "Play/scrub to a flawed frame, then press Set A (key A) and Set B " +
+      "(key B) to add a clip (A=B = single frame). Each A/B pair becomes " +
+      "its own clip and can be accepted or discarded separately.";
   } else {
     const a = pick.a;
-    const b = pick.b == null ? a : pick.b;
-    const s = Math.min(a, b);
-    const e = Math.max(a, b);
-    const noFwd = total > 0 && s === 0; // no saved frame before the range
-    const noBwd = total > 0 && e === total - 1; // no saved frame after the range
-    if (fwd) fwd.disabled = noFwd;
-    if (bwd) bwd.disabled = noBwd;
-    if (noFwd && fwd && fwd.checked && bwd && !bwd.disabled) {
-      fwd.checked = false;
-      bwd.checked = true;
-    } else if (noBwd && bwd && bwd.checked && fwd && !fwd.disabled) {
-      bwd.checked = false;
-      fwd.checked = true;
-    }
+    const s = pick.b == null ? a : Math.min(a, pick.b);
+    const e = pick.b == null ? a : Math.max(a, pick.b);
+    const noFwd = total > 0 && s === 0;
+    const noBwd = total > 0 && e === total - 1;
     if (pick.b == null) {
-      hint = `Frame ${a} (single frame - set B to widen the range)`;
+      hint = `Draft: frame ${a} (single frame - set B to widen the clip)`;
     } else {
-      hint = `Frames ${s}-${e} (${e - s + 1} frame${e - s ? "s" : ""})`;
+      hint = `Draft: frames ${s}-${e} (${e - s + 1} frame${e - s ? "s" : ""})`;
     }
     if (noFwd)
       hint += " A is the first frame, so forward (previous-frame seed) is unavailable.";
     if (noBwd)
       hint += " B is the last frame, so backward (next-frame seed) is unavailable.";
   }
-  const usable = document.querySelector(
-    'input[name="seg-repair-dir"]:checked:not(:disabled)'
-  );
+  if (pick.clips.length) {
+    hint += ` ${pick.clips.length} clip${pick.clips.length > 1 ? "s" : ""} selected.`;
+  }
   $("seg-repair-range-hint").textContent = hint;
-  $("seg-repair-start").disabled = pick.a == null || !usable;
+  $("seg-repair-start").disabled = pick.a == null && pick.clips.length === 0;
 }
 
 async function submitSegRepair() {
   const pick = state.segRepairPick;
-  if (!pick || pick.a == null) return;
-  const s = Math.min(pick.a, pick.b == null ? pick.a : pick.b);
-  const e = Math.max(pick.a, pick.b == null ? pick.a : pick.b);
-  const frames = s === e ? String(s) : s + "-" + e;
-  const dirEl = document.querySelector('input[name="seg-repair-dir"]:checked');
-  const direction = dirEl ? dirEl.value : "forward";
+  if (!pick) return;
+  const job = findSegJob(pick.jobId);
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  const clips = pick.clips.slice();
+  if (pick.a != null) {
+    // lone A draft = single-frame clip
+    const a = pick.a;
+    let direction = "forward";
+    if (total > 0 && a === 0) direction = "backward";
+    clips.push({ s: a, e: a, direction });
+  }
+  if (!clips.length) return;
+  const label = clips
+    .map((c) => (c.s === c.e ? String(c.s) : `${c.s}-${c.e}`))
+    .join(", ");
   try {
     await api("/api/seg/repair", {
       method: "POST",
-      body: { job_id: pick.jobId, frames, direction },
+      body: {
+        job_id: pick.jobId,
+        clips: clips.map((c) => ({
+          frames: c.s === c.e ? String(c.s) : `${c.s}-${c.e}`,
+          direction: c.direction,
+        })),
+      },
     });
     closeSegPreview();
     state.segRepairPick = null;
-    toast(`Repair started: frame(s) ${frames}`);
+    toast(`Repair started: ${clips.length} clip(s) - ${label}`);
     pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
@@ -1796,38 +1881,50 @@ async function submitSegRepair() {
 }
 
 // Reuses the mask-preview video dialog; the footer gains accept / discard.
-function openSegRepairPreview(jobId) {
+function openSegRepairPreview(jobId, clipIndex) {
   const job = findSegJob(jobId);
-  if (!job || !job.repair_url) return;
+  const clips = (job && Array.isArray(job.repair_clips)) ? job.repair_clips : [];
+  const pending = clips.filter((c) => c.status === "pending" && c.url);
+  if (!pending.length) return;
+  const clip = pending.find((c) => c.index === clipIndex) || pending[0];
   state.segRepairJobId = jobId;
+  state.segRepairClipIdx = clip.index;
   const applying = job.repair_status === "accepting";
   $("seg-repair-accept").style.display = applying ? "none" : "";
   $("seg-repair-discard").style.display = applying ? "none" : "";
   $("seg-repair-rewrite-tar").checked = false;
   $("seg-repair-tar-opt").style.display = applying ? "none" : "";
-  const rangeText = fmtRepairFrames(job.repair_frames);
-  const seedText = job.repair_direction === "backward"
+  // clip selector (hidden when there is only one pending clip)
+  const sel = $("seg-repair-clip-sel");
+  sel.innerHTML = pending
+    .map((c) => `<option value="${c.index}" ${c.index === clip.index ? "selected" : ""}>` +
+      `clip ${escHtml(segClipRangeText(c))}</option>`)
+    .join("");
+  sel.style.display = pending.length > 1 ? "" : "none";
+  const rangeText = segClipRangeText(clip);
+  const seedText = clip.direction === "backward"
     ? "next frame's mask, tracked backward"
     : "previous frame's mask, tracked forward";
   let clipText = "";
-  if (Array.isArray(job.repair_clip) && job.repair_clip.length === 2) {
-    clipText = ` Clip shows frames ${job.repair_clip[0]}-${job.repair_clip[1]}. `;
+  if (Array.isArray(clip.clip) && clip.clip.length === 2) {
+    clipText = ` Clip shows frames ${clip.clip[0]}-${clip.clip[1]}. `;
   }
   $("seg-repair-hint").textContent = applying
     ? "The repair is being applied (the result files are being rewritten) - progress is shown on the job row."
     : `Frames ${rangeText} re-tracked from the ${seedText}.` + clipText +
-      "Accept rewrites the result tar(s) + preview frames; Discard keeps the original result.";
+      "Accept rewrites the preview frames + mp4 for this clip; Discard keeps the original result.";
   const video = $("seg-preview-video");
   $("seg-preview-title").textContent =
-    `Repair preview \u00b7 ${job.label || job.job_id}`;
-  video.src = job.repair_url;
+    `Repair preview \u00b7 ${job.label || job.job_id} \u00b7 clip ${rangeText}`;
+  video.src = clip.url;
   $("seg-repair-pick").style.display = "none";
+  $("seg-repair-clips").style.display = "none";
   $("seg-repair-actions").style.display = "flex";
   $("seg-preview-dialog").style.display = "flex";
   video.play().catch(() => { /* user can press play manually */ });
 }
 
-async function acceptSegRepair(jobId, rewriteTar = false) {
+async function acceptSegRepair(jobId, clipIndex, rewriteTar = false) {
   if (state.segRepairAccepting) return;
   const job = findSegJob(jobId);
   if (job && job.repair_status === "accepting") {
@@ -1835,7 +1932,7 @@ async function acceptSegRepair(jobId, rewriteTar = false) {
     return;
   }
   const ok = confirm(
-    "Apply this frame repair? The generated preview frames + preview mp4 " +
+    "Apply this clip repair? The generated preview frames + preview mp4 " +
     "will be rewritten with the repaired frames." +
     (rewriteTar
       ? " The result tar(s) will be fully re-copied too (slow)."
@@ -1846,7 +1943,7 @@ async function acceptSegRepair(jobId, rewriteTar = false) {
   try {
     const res = await api("/api/seg/repair/accept", {
       method: "POST",
-      body: { job_id: jobId, rewrite_tar: !!rewriteTar },
+      body: { job_id: jobId, clip: clipIndex, rewrite_tar: !!rewriteTar },
     });
     closeSegPreview();
     toast("Repair accepted - applying\u2026");
@@ -1858,18 +1955,19 @@ async function acceptSegRepair(jobId, rewriteTar = false) {
   }
 }
 
-async function discardSegRepair(jobId) {
+async function discardSegRepair(jobId, clipIndex) {
   const ok = confirm(
-    "Discard this frame repair? The original result files are kept as-is."
+    "Discard this clip repair? The original result files are kept as-is " +
+    "(the other clips are not affected)."
   );
   if (!ok) return;
   try {
     await api("/api/seg/repair/discard", {
       method: "POST",
-      body: { job_id: jobId },
+      body: { job_id: jobId, clip: clipIndex },
     });
     closeSegPreview();
-    toast("Repair discarded - original results are kept");
+    toast("Clip discarded - original results are kept");
     pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
@@ -2197,12 +2295,20 @@ function wireSeg() {
   $("seg-repair-set-a").onclick = () => setSegRepairPoint("a");
   $("seg-repair-set-b").onclick = () => setSegRepairPoint("b");
   $("seg-repair-start").onclick = submitSegRepair;
+  $("seg-repair-clip-sel").onchange = () => {
+    if (state.segRepairJobId)
+      openSegRepairPreview(state.segRepairJobId, +$("seg-repair-clip-sel").value);
+  };
   $("seg-repair-discard").onclick = () => {
-    if (state.segRepairJobId) discardSegRepair(state.segRepairJobId);
+    if (state.segRepairJobId && state.segRepairClipIdx != null)
+      discardSegRepair(state.segRepairJobId, state.segRepairClipIdx);
   };
   $("seg-repair-accept").onclick = () => {
-    if (state.segRepairJobId)
-      acceptSegRepair(state.segRepairJobId, $("seg-repair-rewrite-tar").checked);
+    if (state.segRepairJobId && state.segRepairClipIdx != null)
+      acceptSegRepair(
+        state.segRepairJobId, state.segRepairClipIdx,
+        $("seg-repair-rewrite-tar").checked
+      );
   };
   $("seg-preview-video").addEventListener("timeupdate", () => {
     if (state.segRepairPick)

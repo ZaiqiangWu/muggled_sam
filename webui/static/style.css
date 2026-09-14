@@ -545,6 +545,36 @@ input[type="range"] { width: 100%; }
 }
 .seg-repair-chip.ok { color: var(--accent2); }
 
+/* multi-clip repair: committed-clip chips in the A/B picker + dialog select */
+.seg-repair-clips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+.seg-repair-clip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel, rgba(255, 255, 255, 0.03));
+}
+.seg-repair-clip b { color: var(--accent); }
+.seg-clip-dir { font-size: 11px; max-width: 84px; }
+.seg-clip-del {
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 16px;
+}
+.seg-clip-sel { font-size: 11px; max-width: 140px; }
+
 /* circular progress ring inside the Preview button */
 .seg-ring { display: block; transform: rotate(-90deg); }
 .seg-ring circle { fill: none; }
