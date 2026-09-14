@@ -132,10 +132,6 @@ VIDEOS_DEST_ROOT = osp.join(_REPO_ROOT, "videos")
 # repair preview encodes only this clip, not the whole video, so repairing
 # a few frames on a long video stays fast.
 REPAIR_CLIP_PAD = 150
-# Context frames on each side of the repaired range included in the repair
-# preview clip (150 = 5s at the fixed 30 fps preview rate). Keeps the repair
-# preview fast: only the clip is encoded, not the whole video.
-REPAIR_CLIP_PAD = 150
 # Raw segmentation results (tars / ffmpeg mp4s) written by the queue
 SAVED_FRAMES_DIR = osp.join(_REPO_ROOT, "saved_images", "run_video")
 # Finished segmentation jobs are persisted here so the task list survives
@@ -2797,6 +2793,9 @@ class SegmentationQueue:
         num_frames = int(job.total_frames or 0)
         min_f, max_f = frames[0], frames[-1]
         seed_f = min_f - 1 if direction == "forward" else max_f + 1
+        clip_start = max(0, min_f - REPAIR_CLIP_PAD)
+        clip_end = min(num_frames - 1, max_f + REPAIR_CLIP_PAD)
+        clip_frames = list(range(clip_start, clip_end + 1))
         imgenc_config_dict = {
             "max_side_length": int(cfg["base_size_px"]),
             "use_square_sizing": not bool(cfg["use_aspect_ratio"]),
@@ -2944,15 +2943,6 @@ class SegmentationQueue:
                     "created_at": time.time(),
                 }, fh)
 
-            # encode the repair preview: a short clip around the repaired
-            # range (repaired frames from staging, the surrounding context
-            # from the existing preview frames). Re-encoding the whole video
-            # would take minutes on long videos; the untouched full video is
-            # already available as the normal mask preview.
-            clip_pad = REPAIR_CLIP_PAD
-            clip_start = max(0, min_f - clip_pad)
-            clip_end = min(num_frames - 1, max_f + clip_pad)
-            clip_frames = list(range(clip_start, clip_end + 1))
             try:
                 import imageio  # lazy: only needed while encoding
             except ImportError as err:
