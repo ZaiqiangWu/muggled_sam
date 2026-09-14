@@ -52,7 +52,6 @@ const state = {
   // currentTime changes asynchronously.  Keep the requested frame separately
   // so held ArrowRight advances from the last request, not a stale decoded frame.
   segRepairTargetFrame: null,
-  segRepairSeeking: false,
   segRepairClipIdx: null,  // clip index shown in the repair preview dialog
   segRepairAccepting: false, // accept request in flight (client-side guard)
 };
@@ -1671,7 +1670,6 @@ function closeSegPreview() {
   state.segRepairPick = null;
   state.segRepairSelectedClipIdx = null;
   state.segRepairTargetFrame = null;
-  state.segRepairSeeking = false;
   state.segRepairClipIdx = null;
 }
 
@@ -1726,7 +1724,6 @@ function openSegRepairPicker(jobId) {
   state.segRepairPick = { jobId, a: null, b: null, clips: [] };
   state.segRepairSelectedClipIdx = null;
   state.segRepairTargetFrame = 0;
-  state.segRepairSeeking = false;
   const video = $("seg-preview-video");
   $("seg-preview-title").textContent =
     `Repair range \u00b7 ${job.label || job.job_id}`;
@@ -1762,8 +1759,10 @@ function setSegRepairFrame(frame, { pause = true } = {}) {
   // only fires after the thumb is released): browsers then decode and paint
   // the target frame continuously while the user drags.
   state.segRepairTargetFrame = safeFrame;
-  state.segRepairSeeking = true;
-  video.currentTime = safeFrame / 30;
+  // Seek to the centre of the frame interval. Seeking on an exact frame
+  // boundary can be rounded to its predecessor by the browser's decoder,
+  // producing apparent repeated frames or occasional two-frame jumps.
+  video.currentTime = (safeFrame + 0.5) / 30;
   $("seg-repair-scrubber").value = String(safeFrame);
   $("seg-repair-cursor").textContent = "frame " + safeFrame;
   $("seg-repair-timeline-label").textContent = `frame ${safeFrame} / ${total - 1}`;
@@ -1818,7 +1817,12 @@ function renderSegRepairTimeline() {
 function setSegRepairPoint(which) {
   const pick = state.segRepairPick;
   if (!pick) return;
-  pick[which] = segRepairCursorFrame();
+  // Prefer the explicit target after keyboard/scrubber movement so A/B uses
+  // exactly the frame the user selected even if the decoder is finishing a
+  // previous asynchronous seek.
+  pick[which] = Number.isInteger(state.segRepairTargetFrame)
+    ? state.segRepairTargetFrame
+    : segRepairCursorFrame();
   if (pick.a != null && pick.b != null) commitDraftClip();
   renderSegRepairClips();
   updateSegRepairPickUi();
@@ -2431,12 +2435,13 @@ function wireSeg() {
     // A selected A/B range loops without changing the native video's source.
     if (selected && frame >= selected.e) {
       state.segRepairTargetFrame = selected.s;
-      state.segRepairSeeking = true;
-      $("seg-preview-video").currentTime = selected.s / 30;
+      $("seg-preview-video").currentTime = (selected.s + 0.5) / 30;
       $("seg-preview-video").play().catch(() => {});
       return;
     }
-    if (!state.segRepairSeeking) state.segRepairTargetFrame = frame;
+    // Normal playback (including the native controls) owns the target. A
+    // paused keyboard seek does not: its seeked event can arrive out of order.
+    if (!$("seg-preview-video").paused) state.segRepairTargetFrame = frame;
     $("seg-repair-cursor").textContent = "frame " + frame;
     $("seg-repair-scrubber").value = String(frame);
     const job = findSegJob(pick.jobId);
@@ -2448,9 +2453,12 @@ function wireSeg() {
     // Update the picker as soon as the decoded frame is ready instead.
     const pick = state.segRepairPick;
     if (!pick) return;
-    const frame = segRepairCursorFrame();
-    state.segRepairTargetFrame = frame;
-    state.segRepairSeeking = false;
+    // Keep the requested frame authoritative here. With rapid key repeats,
+    // browsers may emit a late `seeked` for a cancelled earlier seek; using
+    // its decoded currentTime would undo a later right-arrow increment.
+    const frame = Number.isInteger(state.segRepairTargetFrame)
+      ? state.segRepairTargetFrame
+      : segRepairCursorFrame();
     $("seg-repair-scrubber").value = String(frame);
     $("seg-repair-cursor").textContent = "frame " + frame;
     const job = findSegJob(pick.jobId);
