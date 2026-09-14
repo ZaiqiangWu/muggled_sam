@@ -858,10 +858,10 @@ function getDeviceDefault() {
 const TOOLS = ["hover", "box", "fg", "bg"];
 
 document.addEventListener("keydown", (evt) => {
-  // The repair picker owns A/B and arrow keys while it is open.  Let its
+  // The repair picker owns its playback, A/B and arrow keys while it is open. Let its
   // later listener handle them instead of changing authoring tools/buffers.
   if (state.segRepairPick && $("seg-preview-dialog").style.display !== "none" &&
-      ["ArrowLeft", "ArrowRight", "a", "A", "b", "B"].includes(evt.key)) return;
+      [" ", "ArrowLeft", "ArrowRight", "a", "A", "b", "B"].includes(evt.key)) return;
   const tag = (evt.target && evt.target.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
@@ -2475,6 +2475,13 @@ function wireSeg() {
     }
     if (!state.segRepairPick) return;
     const tag = (evt.target && evt.target.tagName) || "";
+    if (evt.key === " ") {
+      evt.preventDefault();
+      const video = $("seg-preview-video");
+      if (video.paused) video.play().catch(() => {});
+      else video.pause();
+      return;
+    }
     if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
       evt.preventDefault();
       state.segRepairSelectedClipIdx = null;
