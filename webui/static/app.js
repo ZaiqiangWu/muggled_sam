@@ -2044,9 +2044,9 @@ function openSegRepairPreview(jobId, clipIndex) {
     clipText = ` Clip shows frames ${clip.clip[0]}-${clip.clip[1]}. `;
   }
   $("seg-repair-hint").textContent = applying
-    ? "The repair is being applied (the result files are being rewritten) - progress is shown on the job row."
+    ? "The repair is being applied - progress is shown on the job row."
     : `Frames ${rangeText} re-tracked from the ${seedText}.` + clipText +
-      "Accept rewrites the preview frames + mp4 for this clip; Discard keeps the original result.";
+      "Accept applies this clip's preview PNG frames; Regenerate refreshes the full preview video. Discard keeps the original result.";
   const video = $("seg-preview-video");
   $("seg-preview-title").textContent =
     `Repair preview \u00b7 ${job.label || job.job_id} \u00b7 clip ${rangeText}`;
@@ -2065,14 +2065,6 @@ async function acceptSegRepair(jobId, clipIndex, rewriteTar = false) {
     toast("The repair is already being applied - progress shows on the job row");
     return;
   }
-  const ok = confirm(
-    "Apply this clip repair? Only the corresponding generated preview PNG " +
-    "frames will be overwritten. Use Regenerate later to update the full preview video." +
-    (rewriteTar
-      ? " The result tar(s) will be fully re-copied too (slow)."
-      : " The result tar(s) are left unchanged (faster).")
-  );
-  if (!ok) return;
   state.segRepairAccepting = true;
   try {
     const res = await api("/api/seg/repair/accept", {
