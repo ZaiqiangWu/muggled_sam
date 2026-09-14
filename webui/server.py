@@ -1786,7 +1786,7 @@ class SegJob:
                     preview_status = "none"
             # Same for frame repairs: a leftover repair mp4 means a pending
             # (ready) repair, e.g. after a server restart.
-            if repair_status not in ("running", "error", "accepted"):
+            if repair_status not in ("running", "accepting", "error", "accepted"):
                 if osp.isfile(self.repair_mp4_path()):
                     repair_status = "ready"
                     self._repair_load_meta()
@@ -2441,7 +2441,7 @@ class SegmentationQueue:
             raise ValueError("No mask frames generated")
         self._encode_preview_video(job, frame_paths, out_mp4)
 
-    def _encode_preview_video(self, job, frame_paths, out_path):
+    def _encode_preview_video(self, job, frame_paths, out_path, progress=None):
         """Encode 'white background + original pixels inside the mask' mp4."""
         try:
             import imageio  # lazy: only needed while generating a preview
@@ -2463,7 +2463,10 @@ class SegmentationQueue:
                 alpha = data[:, :, 3]
                 frame[alpha == 0] = 255  # white outside the segmented region
                 writer.append_data(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                self._set_preview_progress(job, 0.55 + 0.45 * (i + 1) / n)
+                if progress is not None:
+                    progress((i + 1) / n)
+                else:
+                    self._set_preview_progress(job, 0.55 + 0.45 * (i + 1) / n)
         finally:
             writer.close()
 
@@ -2512,6 +2515,11 @@ class SegmentationQueue:
                 raise ValueError(f"No such job: {job_id}")
             if job.status != "done":
                 raise ValueError(f"Only finished jobs can be deleted (job is {job.status})")
+            if job.repair_status in ("running", "accepting"):
+                raise ValueError(
+                    "A frame repair is in progress - wait for it to finish "
+                    "before deleting"
+                )
             removed = []
             # drop a queued preview so the worker does not start it after the
             # tars are gone
@@ -2720,6 +2728,8 @@ class SegmentationQueue:
                 )
             if job.repair_status == "running":
                 raise ValueError("A frame repair is already running for this job")
+            if job.repair_status == "accepting":
+                raise ValueError("A repair is being applied - wait for it to finish")
             frames = self._parse_repair_frames(frames_raw)
             total = int(job.total_frames or 0)
             if total <= 0:
@@ -2985,10 +2995,11 @@ class SegmentationQueue:
         held while this runs (it can take a while for long videos)."""
         staging = job.repair_staging_dir()
         tar_by_obj = self._map_tar_to_objects(job, objects)
-        for objidx in objects:
+        for i, objidx in enumerate(objects):
             self._rewrite_tar_repaired_frames(
                 tar_by_obj[objidx], osp.join(staging, f"obj{objidx:02d}"), frames
             )
+            self._set_repair_progress(job, 0.05 * (i + 1) / len(objects))
         png_dir = job.preview_png_dir()
         os.makedirs(png_dir, exist_ok=True)
         merged_dir = osp.join(staging, "merged")
@@ -2996,16 +3007,23 @@ class SegmentationQueue:
             src = osp.join(merged_dir, f"{frame_idx:08d}.png")
             if osp.isfile(src):
                 shutil.copyfile(src, osp.join(png_dir, f"{frame_idx:08d}.png"))
+        self._set_repair_progress(job, 0.10)
         frame_paths = sorted(
             osp.join(png_dir, n) for n in os.listdir(png_dir)
             if n.lower().endswith(".png")
         )
         if frame_paths:
-            self._encode_preview_video(job, frame_paths, job.preview_mp4_path())
+            self._encode_preview_video(
+                job, frame_paths, job.preview_mp4_path(),
+                progress=lambda p: self._set_repair_progress(job, 0.10 + 0.85 * p),
+            )
         shutil.rmtree(staging, ignore_errors=True)
         repair_mp4 = job.repair_mp4_path()
         if osp.isfile(repair_mp4):
-            os.remove(repair_mp4)
+            try:
+                os.remove(repair_mp4)
+            except OSError:  # noqa: BLE001
+                pass  # non-fatal: it will be replaced by the next repair
         with self._lock:
             job.repair_status = "accepted"
             job.repair_progress = 1.0
@@ -3021,8 +3039,9 @@ class SegmentationQueue:
             )
 
     def accept_repair(self, job_id):
-        """Apply a pending frame repair (see _apply_repair). Returns the
-        job dict. The job can then be accepted to ./videos/ as usual."""
+        """Apply a pending frame repair in the background (see
+        _apply_repair). Returns the job dict immediately; progress is
+        reported via repair_status="accepting" + repair_progress."""
         with self._lock:
             job = self._by_id.get(job_id)
             if job is None:
@@ -3031,7 +3050,7 @@ class SegmentationQueue:
                 raise ValueError("Only finished jobs support frame repair")
             if job.repair_status == "running":
                 raise ValueError("The repair is still running - wait for it to finish")
-            if getattr(job, "_repair_accepting", False):
+            if job.repair_status == "accepting" or getattr(job, "_repair_accepting", False):
                 raise ValueError("Repair accept is already in progress for this job")
             meta_path = osp.join(job.repair_staging_dir(), "meta.json")
             if not osp.isfile(meta_path):
@@ -3044,12 +3063,37 @@ class SegmentationQueue:
             if not frames or not objects:
                 raise ValueError("Repair metadata is empty - start a repair first")
             job._repair_accepting = True
+            job.repair_status = "accepting"
+            job.repair_progress = 0.0
+            job.repair_error = None
+        threading.Thread(
+            target=self._run_accept_repair,
+            args=(job, frames, objects, direction),
+            name=f"seg-repair-accept-{job.job_id}",
+            daemon=True,
+        ).start()
+        return job.to_dict()
+
+    def _run_accept_repair(self, job, frames, objects, direction):
+        """Background worker for accept_repair. Re-encoding the preview mp4
+        can take a while on long videos, so the HTTP request returns right
+        away and the UI tracks progress via the job snapshot."""
         try:
             self._apply_repair(job, frames, objects, direction)
+        except Exception as err:  # noqa: BLE001
+            traceback.print_exc()
+            with self._lock:
+                job.repair_error = f"{type(err).__name__}: {err}"
+                # keep the pending repair retryable while its staging data
+                # is still on disk; otherwise mark the repair failed
+                if osp.isfile(osp.join(job.repair_staging_dir(), "meta.json")):
+                    job.repair_status = "ready"
+                    job.repair_progress = 1.0
+                else:
+                    job.repair_status = "error"
         finally:
             with self._lock:
                 job._repair_accepting = False
-        return job.to_dict()
 
     def discard_repair(self, job_id):
         """Throw away a pending frame repair (original results stay as-is)."""
@@ -3057,8 +3101,10 @@ class SegmentationQueue:
             job = self._by_id.get(job_id)
             if job is None:
                 raise ValueError(f"No such job: {job_id}")
-            if job.repair_status == "running":
-                raise ValueError("The repair is still running - wait for it to finish")
+            if job.repair_status in ("running", "accepting"):
+                raise ValueError(
+                    "The repair is still in progress - wait for it to finish"
+                )
             staging = job.repair_staging_dir()
             if osp.isdir(staging):
                 shutil.rmtree(staging, ignore_errors=True)

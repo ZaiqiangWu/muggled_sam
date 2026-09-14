@@ -241,13 +241,17 @@ Each finished job card has three buttons on the bottom right:
   row then shows
   `▶ Repair` (play the repair preview in the same video dialog, which gains
   **Accept repair** / **Discard** buttons in the footer),
-  **Accept repair** (rewrites the result tar(s) — replacing only the repaired
-  frames — overwrites the generated preview frames, re-encodes the preview
-  mp4, and deletes the staging; the job can afterwards be Accepted to
-  `./videos/` as usual), and **Discard** (staging + repair mp4 are deleted,
-  original results kept as-is). A `pending: …` / `repaired: …` chip shows the
-  affected frames. Tracking-mode jobs only (not pure_text), and not available
-  once the mask frames have been accepted.
+  **Accept repair** (applies the repair in the background — rewriting the
+  result tar(s) — replacing only the repaired frames — overwriting the
+  generated preview frames, re-encoding the preview mp4, and deleting the
+  staging; the job can afterwards be Accepted to `./videos/` as usual), and
+  **Discard** (staging + repair mp4 are deleted, original results kept as-is).
+  While applying, the button row is replaced by a progress ring
+  (`Applying N%`) and Accept / Discard are unavailable; if the apply step
+  fails, the pending repair is kept (with the error shown) so Accept can be
+  retried. A `pending: …` / `repaired: …` chip shows the affected frames.
+  Tracking-mode jobs only (not pure_text), and not available once the mask
+  frames have been accepted.
 - **Accept** — moves the generated frames to `./videos/<garment>/<video_stem>/`
   (`<garment>` is the video stem without its last `_`-separated part, exactly
   like `check_generated_masks.py`).

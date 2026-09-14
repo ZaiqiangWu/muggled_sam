@@ -46,6 +46,7 @@ const state = {
   segJobs: [],        // last segmentation queue snapshot (for button handlers)
   segRepairJobId: null, // job whose repair picker / repair preview is open
   segRepairPick: null,  // { jobId, a, b }: A/B points set on the preview bar
+  segRepairAccepting: false, // accept request in flight (client-side guard)
 };
 
 // ------------------------------------------------------------------ helpers
@@ -1292,6 +1293,22 @@ function segRepairHtml(job) {
       <span>Repair ${Math.round(p * 100)}%</span>
     </button>`;
   }
+  if (st === "accepting") {
+    const p = Math.max(0, Math.min(1, job.repair_progress || 0));
+    const off = (RING_CIRC * (1 - p)).toFixed(2);
+    const rangeText = fmtRepairFrames(job.repair_frames);
+    return `
+      <button class="seg-repair running" data-id="${id}" disabled
+        title="Applying the repair: the result tar(s) + preview frames are being rewritten...">
+        <svg class="seg-ring" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
+          <circle class="seg-ring-bg" cx="10" cy="10" r="8"></circle>
+          <circle class="seg-ring-fg" cx="10" cy="10" r="8"
+            stroke-dasharray="${RING_CIRC.toFixed(2)}" stroke-dashoffset="${off}"></circle>
+        </svg>
+        <span>Applying ${Math.round(p * 100)}%</span>
+      </button>
+      <span class="seg-repair-chip" title="Repair in progress (result files are being rewritten): ${escHtml(rangeText)}">applying: ${escHtml(rangeText)}</span>`;
+  }
   if (st === "ready") {
     const rangeText = fmtRepairFrames(job.repair_frames);
     return `
@@ -1336,7 +1353,7 @@ function segJobHtml(job) {
     previewErrHtml = `<div class="seg-job-err">preview: ${escHtml(job.preview_error)}</div>`;
   }
   let repairErrHtml = "";
-  if (job.status === "done" && job.repair_status === "error" && job.repair_error) {
+  if (job.status === "done" && job.repair_error) {
     repairErrHtml = `<div class="seg-job-err">repair: ${escHtml(job.repair_error)}</div>`;
   }
   // 追加要求2: bottom-right actions for finished jobs
@@ -1802,21 +1819,25 @@ function openSegRepairPreview(jobId) {
 }
 
 async function acceptSegRepair(jobId) {
+  if (state.segRepairAccepting) return;
   const ok = confirm(
     "Apply this frame repair? The result tar(s) and the generated preview " +
     "frames will be rewritten with the repaired frames."
   );
   if (!ok) return;
+  state.segRepairAccepting = true;
   try {
     const res = await api("/api/seg/repair/accept", {
       method: "POST",
       body: { job_id: jobId },
     });
     closeSegPreview();
-    toast((res && res.job && res.job.message) || "Repair accepted: result files rewritten");
+    toast("Repair accepted - applying\u2026 (result files will be rewritten)");
     pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
+  } finally {
+    state.segRepairAccepting = false;
   }
 }
 
