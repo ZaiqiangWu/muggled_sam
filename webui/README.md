@@ -253,8 +253,10 @@ Each finished job card has three buttons on the bottom right:
   appears when several clips are pending). **Each clip is decided
   independently**:
   - **Accept repair** (applies that clip's repair in the background —
-    overwriting the generated preview frames and re-encoding the preview mp4;
-    the job can afterwards be Accepted to `./videos/` as usual);
+    overwriting only its generated preview PNG frames; the task's **Preview**
+    button changes to **Regenerate**, which rebuilds the full preview mp4 once
+    after you have accepted all desired clips; the job can afterwards be
+    Accepted to `./videos/` as usual);
   - **Discard** (that clip's staging + preview mp4 are deleted, the original
     frames are kept as-is).
   A green `repaired: …` chip lists the frames already accepted.
@@ -266,9 +268,10 @@ Each finished job card has three buttons on the bottom right:
   preview never regresses to the flawed frames. While applying, the button
   row shows a progress ring (`Applying N%`) for that clip and Accept /
   Discard are unavailable; the ring's tooltip shows the current stage — the
-  repaired frames are copied into the preview frames, then the full preview
-  mp4 is re-encoded (plus the tar re-copy first, ~0–50%, when the checkbox
-  is on), with per-stage progress reported throughout. If the apply step
+  repaired frames are copied into the preview PNGs; the full preview mp4 is
+  rebuilt only when **Regenerate** is pressed (plus the tar re-copy first,
+  ~0–50%, when the checkbox is on), with per-stage progress reported
+  throughout. If the apply step
   fails, the pending clip is kept (with the error shown) so Accept can be
   retried. The pending/accepted repair state survives server restarts (kept
   in the staging `meta.json`).
@@ -318,8 +321,8 @@ output layout as the script.
 - `GET  /api/seg/repair_video?job_id=&clip=N` — stream clip N's repair
   preview mp4 (Range-aware)
 - `POST /api/seg/repair/accept` — `{job_id, clip: N, rewrite_tar: false}`
-  apply clip N's repair: preview frames (+ preview mp4) always, tar(s) only
-  when `rewrite_tar` is true
+  apply clip N's repair: corresponding preview PNG frames always, tar(s) only
+  when `rewrite_tar` is true; regenerate the full preview mp4 separately
 - `POST /api/seg/repair/discard` — `{job_id, clip: N}` throw away clip N's
   pending repair
 - `POST /api/seg/accept` — `{job_id}` move frames to `./videos/<garment>/<name>/`

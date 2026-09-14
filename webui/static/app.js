@@ -1236,6 +1236,7 @@ function fmtDuration(sec) {
 //   queued -> 0% ring (waiting for the preview slot; FIFO)
 //   generating -> circular progress ring + percent
 //   ready -> play icon (opens the video dialog)
+//   repair accepted -> "Regenerate" (refresh the full MP4 once, on demand)
 const RING_CIRC = 50.265; // 2 * PI * 8
 function segPreviewButtonHtml(job) {
   const id = escHtml(job.job_id);
@@ -1255,6 +1256,10 @@ function segPreviewButtonHtml(job) {
       </svg>
       <span>${Math.round(p * 100)}%</span>
     </button>`;
+  }
+  if (job.preview_needs_regen) {
+    return `<button class="seg-preview" data-id="${id}"
+      title="Regenerate the full mask preview video with accepted repair PNGs">Regenerate</button>`;
   }
   if (st === "ready") {
     return `<button class="seg-preview ready" data-id="${id}"
@@ -1307,7 +1312,7 @@ function segRepairHtml(job) {
   const acceptedText = fmtRepairFrames(accepted.flatMap((c) => c.frames || []));
   const acceptedChip = accepted.length
     ? `<span class="seg-repair-chip ok"
-        title="Frame repair applied (preview frames + preview mp4 rewritten): ${escHtml(acceptedText)}">repaired: ${escHtml(acceptedText)}</span>`
+        title="Frame repair applied to preview PNGs; regenerate the full preview video when ready: ${escHtml(acceptedText)}">repaired: ${escHtml(acceptedText)}</span>`
     : "";
   if (st === "running") {
     const p = Math.max(0, Math.min(1, job.repair_progress || 0));
@@ -1330,7 +1335,7 @@ function segRepairHtml(job) {
     const rangeText = active ? segClipRangeText(active) : "";
     const phaseTitle = job.repair_phase
       ? escHtml(job.repair_phase)
-      : "Applying the repair: the preview frames + preview mp4 are being rewritten...";
+      : "Applying the repair: the repaired PNG frames are being copied...";
     return `
       <button class="seg-repair running" data-id="${id}" disabled
         title="${phaseTitle}">
@@ -1630,6 +1635,18 @@ async function onPreviewClick(jobId) {
   if (!job) return;
   if (job.preview_status === "generating") return; // ring is visible; wait
   if (job.preview_status === "queued") return; // 0% ring: waiting for its turn
+  if (job.preview_needs_regen) {
+    try {
+      const res = await api("/api/seg/preview", { method: "POST", body: { job_id: jobId } });
+      toast(res.queued
+        ? "Regeneration queued - it starts when the other preview finishes"
+        : "Regenerating full mask preview video…");
+      await pollSegStatus();
+    } catch (err) {
+      toast(err.message || String(err), true);
+    }
+    return;
+  }
   if (job.preview_status === "ready") {
     openSegPreview(job);
     return;
@@ -2049,8 +2066,8 @@ async function acceptSegRepair(jobId, clipIndex, rewriteTar = false) {
     return;
   }
   const ok = confirm(
-    "Apply this clip repair? The generated preview frames + preview mp4 " +
-    "will be rewritten with the repaired frames." +
+    "Apply this clip repair? Only the corresponding generated preview PNG " +
+    "frames will be overwritten. Use Regenerate later to update the full preview video." +
     (rewriteTar
       ? " The result tar(s) will be fully re-copied too (slow)."
       : " The result tar(s) are left unchanged (faster).")
@@ -2504,7 +2521,21 @@ function wireSeg() {
         }
         video.play().catch(() => {});
       }
-      else video.pause();
+      else {
+        video.pause();
+        // `timeupdate` is throttled (often by several frames at 30 fps), so
+        // synchronise from currentTime at the exact pause point. Otherwise
+        // the first arrow key starts from an older target and appears to jump.
+        const pausedFrame = segRepairCursorFrame();
+        state.segRepairTargetFrame = pausedFrame;
+        $("seg-repair-scrubber").value = String(pausedFrame);
+        $("seg-repair-cursor").textContent = "frame " + pausedFrame;
+        const job = findSegJob(state.segRepairPick.jobId);
+        const total = job && job.total_frames > 0 ? job.total_frames : 0;
+        $("seg-repair-timeline-label").textContent = total
+          ? `frame ${pausedFrame} / ${total - 1}`
+          : `frame ${pausedFrame}`;
+      }
       return;
     }
     if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {

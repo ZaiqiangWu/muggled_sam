@@ -1683,6 +1683,8 @@ class SegJob:
         self.preview_status = "none"     # none | queued | generating | ready | error
         self.preview_progress = 0.0      # 0..1 while generating
         self.preview_error = None
+        # Accepted repair PNG overrides exist that are newer than preview_mp4.
+        self.preview_needs_regen = False
         self.accepted = False
         # Frame repair state (finished jobs only): re-track a flawed frame
         # range seeded from an adjacent frame's mask. Repaired frames are
@@ -1885,6 +1887,7 @@ class SegJob:
             "preview_status": preview_status,
             "preview_progress": round(self.preview_progress, 3),
             "preview_error": self.preview_error,
+            "preview_needs_regen": self.preview_needs_regen,
             "preview_url": preview_url,
             "repair_status": repair_status,
             "repair_progress": round(self.repair_progress, 3),
@@ -1915,6 +1918,7 @@ class SegJob:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "preview_needs_regen": self.preview_needs_regen,
         }
 
 
@@ -2003,6 +2007,7 @@ class SegmentationQueue:
             job.created_at = float(d.get("created_at") or time.time())
             job.started_at = d.get("started_at")
             job.finished_at = d.get("finished_at")
+            job.preview_needs_regen = bool(d.get("preview_needs_regen", False))
             if job.status in ("queued", "running"):
                 # the server went away while the job was still active
                 job.status = "cancelled"
@@ -2401,6 +2406,8 @@ class SegmentationQueue:
                     if job.preview_status == "generating":
                         job.preview_status = "ready"
                         job.preview_progress = 1.0
+                        job.preview_needs_regen = False
+                        self._persist_finished()
             except Exception as err:  # noqa: BLE001
                 with self._lock:
                     if job.preview_status == "generating":
@@ -3229,12 +3236,13 @@ class SegmentationQueue:
             traceback.print_exc()
 
     def _apply_repair(self, job, clip, objects, rewrite_tar=False):
-        """File work for accepting one repair clip: overwrite the preview
-        pngs, re-encode the preview mp4, drop the clip's staging. The result
-        tars are only re-copied when rewrite_tar is True (a full multi-GB
-        copy); otherwise the repaired frames are kept as overrides that
-        preview regeneration re-applies. The queue lock is NOT held while
-        this runs (it can take a while for long videos)."""
+        """Apply one repair by overwriting only its preview PNG frames.
+
+        The full preview MP4 is intentionally left untouched until the user
+        presses Regenerate. Result tars are re-copied only when rewrite_tar
+        is True; otherwise the repaired frames are kept as overrides for a
+        later preview regeneration.
+        """
         clip_index = int(clip["index"])
         frames = list(clip["frames"])
         direction = str(clip["direction"])
@@ -3265,10 +3273,8 @@ class SegmentationQueue:
                 stale = osp.join(overrides_dir, f"{frame_idx:08d}.png")
                 if osp.isfile(stale):
                     os.remove(stale)
-            copy_start, encode_range = 0.55, 0.40
         else:
             self._set_repair_progress(job, 0.05)
-            copy_start, encode_range = 0.10, 0.85
         self._set_repair_phase(
             job, "Copying the repaired frames into the preview frames"
         )
@@ -3289,22 +3295,10 @@ class SegmentationQueue:
                     shutil.copyfile(
                         src, osp.join(overrides_dir, f"{frame_idx:08d}.png")
                     )
-        self._set_repair_progress(job, copy_start)
-        frame_paths = sorted(
-            osp.join(png_dir, n) for n in os.listdir(png_dir)
-            if n.lower().endswith(".png")
-        )
-        if frame_paths:
-            self._set_repair_phase(
-                job, "Re-encoding the full preview video (white background)"
-            )
-            self._encode_preview_video(
-                job, frame_paths, job.preview_mp4_path(),
-                progress=lambda p: self._set_repair_progress(
-                    job, copy_start + encode_range * p
-                ),
-                cancel_check=job.cancel_requested,
-            )
+        # Deliberately do not re-encode the complete preview MP4 here.  A
+        # short repair only changes these PNGs; the user can later request one
+        # explicit Regenerate after accepting all desired clips.
+        self._set_repair_progress(job, 0.90)
         shutil.rmtree(clip_dir, ignore_errors=True)
         clip_mp4 = job.repair_clip_mp4_path(clip_index)
         if osp.isfile(clip_mp4):
@@ -3322,17 +3316,15 @@ class SegmentationQueue:
             job.repair_error = None
             job.repair_phase = None
             job.repair_active_clip = None
-            job.preview_status = "ready"
-            job.preview_progress = 1.0
-            job.preview_error = None
+            job.preview_needs_regen = True
             job.message = (
                 f"Repair accepted: {len(frames)} frame(s) of clip "
                 f"{frames[0]}-{frames[-1]} rewritten in the result tar(s) + "
-                f"preview frames"
+                "preview PNGs (regenerate preview video when ready)"
                 if rewrite_tar else
                 f"Repair accepted: {len(frames)} frame(s) of clip "
-                f"{frames[0]}-{frames[-1]} applied to the preview frames "
-                f"(result tar left unchanged)"
+                f"{frames[0]}-{frames[-1]} applied to the preview PNGs "
+                "(result tar left unchanged; regenerate preview video when ready)"
             )
             if not any_pending:
                 # all clips decided: drop the staging entirely
@@ -3341,6 +3333,7 @@ class SegmentationQueue:
                     shutil.rmtree(staging, ignore_errors=True)
                 else:
                     self._repair_save_meta(job)
+            self._persist_finished()
 
     def accept_repair(self, job_id, clip_index=0, rewrite_tar=False):
         """Apply one pending repair clip in the background (see
