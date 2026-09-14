@@ -48,6 +48,7 @@ const state = {
   // { jobId, a, b, clips: [{s, e, direction}] }: A/B draft points +
   // committed clips set on the preview bar
   segRepairPick: null,
+  segRepairSelectedClipIdx: null, // committed clip selected for timeline looping
   segRepairClipIdx: null,  // clip index shown in the repair preview dialog
   segRepairAccepting: false, // accept request in flight (client-side guard)
 };
@@ -854,6 +855,10 @@ function getDeviceDefault() {
 const TOOLS = ["hover", "box", "fg", "bg"];
 
 document.addEventListener("keydown", (evt) => {
+  // The repair picker owns A/B and arrow keys while it is open.  Let its
+  // later listener handle them instead of changing authoring tools/buffers.
+  if (state.segRepairPick && $("seg-preview-dialog").style.display !== "none" &&
+      ["ArrowLeft", "ArrowRight", "a", "A", "b", "B"].includes(evt.key)) return;
   const tag = (evt.target && evt.target.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
@@ -1655,10 +1660,12 @@ function closeSegPreview() {
   video.removeAttribute("src");
   video.load(); // stop downloading
   $("seg-repair-pick").style.display = "none";
+  $("seg-repair-timeline").style.display = "none";
   $("seg-repair-clips").style.display = "none";
   $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "none";
   state.segRepairPick = null;
+  state.segRepairSelectedClipIdx = null;
   state.segRepairClipIdx = null;
 }
 
@@ -1711,11 +1718,13 @@ function openSegRepairPicker(jobId) {
   state.segRepairJobId = jobId;
   state.segRepairClipIdx = null;
   state.segRepairPick = { jobId, a: null, b: null, clips: [] };
+  state.segRepairSelectedClipIdx = null;
   const video = $("seg-preview-video");
   $("seg-preview-title").textContent =
     `Repair range \u00b7 ${job.label || job.job_id}`;
   video.src = job.preview_url;
   $("seg-repair-pick").style.display = "flex";
+  $("seg-repair-timeline").style.display = "flex";
   $("seg-repair-clips").style.display = "flex";
   $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "flex";
@@ -1731,6 +1740,66 @@ function segRepairCursorFrame() {
   const frame = Math.floor($("seg-preview-video").currentTime * 30 + 1e-6);
   if (total <= 0) return frame;
   return Math.max(0, Math.min(frame, total - 1));
+}
+
+function setSegRepairFrame(frame, { pause = true } = {}) {
+  const pick = state.segRepairPick;
+  const job = pick ? findSegJob(pick.jobId) : null;
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  if (total <= 0) return;
+  const safeFrame = Math.max(0, Math.min(Math.round(frame), total - 1));
+  const video = $("seg-preview-video");
+  if (pause) video.pause();
+  video.currentTime = safeFrame / 30;
+  $("seg-repair-scrubber").value = String(safeFrame);
+  $("seg-repair-cursor").textContent = "frame " + safeFrame;
+  $("seg-repair-timeline-label").textContent = `frame ${safeFrame} / ${total - 1}`;
+}
+
+function selectSegRepairClip(index, { play = true } = {}) {
+  const pick = state.segRepairPick;
+  const clip = pick && pick.clips[index];
+  if (!clip) return;
+  state.segRepairSelectedClipIdx = index;
+  setSegRepairFrame(clip.s);
+  renderSegRepairClips();
+  renderSegRepairTimeline();
+  if (play) $("seg-preview-video").play().catch(() => {});
+}
+
+function renderSegRepairTimeline() {
+  const scrubber = $("seg-repair-scrubber");
+  const markers = $("seg-repair-markers");
+  const pick = state.segRepairPick;
+  const job = pick ? findSegJob(pick.jobId) : null;
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  if (!pick || total <= 0) {
+    scrubber.max = "0";
+    scrubber.value = "0";
+    scrubber.disabled = true;
+    markers.innerHTML = "";
+    return;
+  }
+  scrubber.disabled = false;
+  scrubber.max = String(total - 1);
+  scrubber.value = String(segRepairCursorFrame());
+  markers.innerHTML = pick.clips.map((clip, index) => {
+    // Positions are expressed against the first/last frame endpoints so a
+    // clip touching the last frame still ends inside the displayed track.
+    const span = Math.max(total - 1, 1);
+    const left = (clip.s / span) * 100;
+    const width = Math.min(Math.max(((clip.e - clip.s + 1) / total) * 100, 0.6), 100 - left);
+    const selected = index === state.segRepairSelectedClipIdx ? " selected" : "";
+    const range = clip.s === clip.e ? `frame ${clip.s}` : `frames ${clip.s}-${clip.e}`;
+    return `<button type="button" class="seg-repair-marker${selected}" data-clip-idx="${index}"
+      style="left:${left}%;width:${width}%" title="Loop ${escHtml(range)}"></button>`;
+  }).join("");
+  markers.querySelectorAll(".seg-repair-marker").forEach((marker) => {
+    marker.onclick = (evt) => {
+      evt.preventDefault();
+      selectSegRepairClip(+marker.dataset.clipIdx);
+    };
+  });
 }
 
 function setSegRepairPoint(which) {
@@ -1753,14 +1822,15 @@ function commitDraftClip() {
   const e = Math.max(pick.a, pick.b);
   pick.a = null;
   pick.b = null;
-  const overlap = pick.clips.find((c) => !(e < c.s || s > c.e));
+  const overlap = pick.clips.find((c) => !(e + 1 < c.s || s > c.e + 1));
   if (overlap) {
-    toast(`Frames ${s}-${e} overlap the selected clip ${overlap.s}-${overlap.e}`, true);
+    toast(`Frames ${s}-${e} overlap or touch clip ${overlap.s}-${overlap.e}`, true);
     return;
   }
   let direction = "forward";
   if (total > 0 && s === 0) direction = "backward";
   pick.clips.push({ s, e, direction });
+  state.segRepairSelectedClipIdx = pick.clips.length - 1;
 }
 
 // Render the committed-clip chips (each with a direction select + remove).
@@ -1777,7 +1847,8 @@ function renderSegRepairClips() {
     const dir = noFwd ? "backward" : noBwd ? "forward" : c.direction;
     c.direction = dir;
     const rangeText = c.s === c.e ? String(c.s) : `${c.s}\u2013${c.e}`;
-    return `<span class="seg-repair-clip">
+    const selected = i === state.segRepairSelectedClipIdx ? " selected" : "";
+    return `<span class="seg-repair-clip${selected}" data-clip-idx="${i}" title="Select and loop this clip">
       <b>${escHtml(rangeText)}</b>
       <select class="seg-clip-dir" data-clip-idx="${i}"
         title="Seed direction for this clip">
@@ -1799,12 +1870,23 @@ function renderSegRepairClips() {
     };
   });
   box.querySelectorAll(".seg-clip-del").forEach((btn) => {
-    btn.onclick = () => {
+    btn.onclick = (evt) => {
+      evt.stopPropagation();
       const pk = state.segRepairPick;
       if (!pk) return;
-      pk.clips.splice(+btn.dataset.clipIdx, 1);
+      const deleted = +btn.dataset.clipIdx;
+      pk.clips.splice(deleted, 1);
+      if (state.segRepairSelectedClipIdx === deleted) state.segRepairSelectedClipIdx = null;
+      else if (state.segRepairSelectedClipIdx > deleted) state.segRepairSelectedClipIdx -= 1;
       renderSegRepairClips();
+      renderSegRepairTimeline();
       updateSegRepairPickUi();
+    };
+  });
+  box.querySelectorAll(".seg-repair-clip").forEach((chip) => {
+    chip.onclick = (evt) => {
+      if (evt.target.tagName === "SELECT" || evt.target.tagName === "BUTTON") return;
+      selectSegRepairClip(+chip.dataset.clipIdx);
     };
   });
 }
@@ -1841,6 +1923,7 @@ function updateSegRepairPickUi() {
   }
   $("seg-repair-range-hint").textContent = hint;
   $("seg-repair-start").disabled = pick.a == null && pick.clips.length === 0;
+  renderSegRepairTimeline();
 }
 
 async function submitSegRepair() {
@@ -2295,6 +2378,14 @@ function wireSeg() {
   $("seg-repair-set-a").onclick = () => setSegRepairPoint("a");
   $("seg-repair-set-b").onclick = () => setSegRepairPoint("b");
   $("seg-repair-start").onclick = submitSegRepair;
+  $("seg-repair-scrubber").oninput = () => {
+    // Scrubbing is intentionally a pause: it gives A/B placement a stable
+    // frame, and selecting a marked clip is the explicit way to start a loop.
+    state.segRepairSelectedClipIdx = null;
+    setSegRepairFrame(+$('seg-repair-scrubber').value);
+    renderSegRepairClips();
+    renderSegRepairTimeline();
+  };
   $("seg-repair-clip-sel").onchange = () => {
     if (state.segRepairJobId)
       openSegRepairPreview(state.segRepairJobId, +$("seg-repair-clip-sel").value);
@@ -2310,9 +2401,28 @@ function wireSeg() {
         $("seg-repair-rewrite-tar").checked
       );
   };
+  $("seg-preview-video").addEventListener("loadedmetadata", () => {
+    if (state.segRepairPick) {
+      renderSegRepairTimeline();
+      setSegRepairFrame(segRepairCursorFrame(), { pause: false });
+    }
+  });
   $("seg-preview-video").addEventListener("timeupdate", () => {
-    if (state.segRepairPick)
-      $("seg-repair-cursor").textContent = "frame " + segRepairCursorFrame();
+    const pick = state.segRepairPick;
+    if (!pick) return;
+    const frame = segRepairCursorFrame();
+    const selected = pick.clips[state.segRepairSelectedClipIdx];
+    // A selected A/B range loops without changing the native video's source.
+    if (selected && frame >= selected.e) {
+      $("seg-preview-video").currentTime = selected.s / 30;
+      $("seg-preview-video").play().catch(() => {});
+      return;
+    }
+    $("seg-repair-cursor").textContent = "frame " + frame;
+    $("seg-repair-scrubber").value = String(frame);
+    const job = findSegJob(pick.jobId);
+    const total = job && job.total_frames > 0 ? job.total_frames : 0;
+    $("seg-repair-timeline-label").textContent = total ? `frame ${frame} / ${total - 1}` : `frame ${frame}`;
   });
   document.addEventListener("keydown", (evt) => {
     if (evt.key === "Escape") {
@@ -2324,7 +2434,15 @@ function wireSeg() {
     }
     if (!state.segRepairPick) return;
     const tag = (evt.target && evt.target.tagName) || "";
-    if (tag === "INPUT" || tag === "TEXTAREA") return;
+    if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
+      evt.preventDefault();
+      state.segRepairSelectedClipIdx = null;
+      setSegRepairFrame(segRepairCursorFrame() + (evt.key === "ArrowRight" ? 1 : -1));
+      renderSegRepairClips();
+      renderSegRepairTimeline();
+      return;
+    }
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
     if (evt.key === "a" || evt.key === "A") setSegRepairPoint("a");
     else if (evt.key === "b" || evt.key === "B") setSegRepairPoint("b");
   });

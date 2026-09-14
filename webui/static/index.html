@@ -379,6 +379,17 @@
           aria-label="Close">&times;</button>
       </div>
       <video id="seg-preview-video" controls preload="metadata"></video>
+      <!-- Repair-only annotated timeline.  Native video controls remain
+           available, while this timeline makes selected A/B ranges visible
+           and directly selectable. -->
+      <div id="seg-repair-timeline" class="seg-repair-timeline" style="display:none">
+        <div class="seg-repair-timeline-track">
+          <input id="seg-repair-scrubber" type="range" min="0" max="0" value="0"
+            aria-label="Repair preview frame">
+          <div id="seg-repair-markers" class="seg-repair-markers"></div>
+        </div>
+        <span id="seg-repair-timeline-label" class="hint">frame 0</span>
+      </div>
       <!-- Frame repair A/B point picker (segmentation tab): set the flawed
            frame range on the progress bar (A=B = single frame), pick the
            seed direction, then start the repair -->

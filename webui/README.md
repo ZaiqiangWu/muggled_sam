@@ -216,7 +216,10 @@ Each finished job card has three buttons on the bottom right:
   press **Set A** (keyboard `A`), then press **Set B** (keyboard `B`) at the
   end of the range — A and B on the same frame = single-frame repair; once
   both points are set the range is committed as a **clip** (shown as a chip
-  under the picker). Repeat Set A / Set B to add more clips — **several
+  under the picker and as a marked range on the repair timeline). While the
+  picker is open, use `←` / `→` to pause and move exactly one frame at a
+  time. Click a chip or its timeline range to select and loop that clip;
+  click its ✕ to remove it. Repeat Set A / Set B to add more clips — **several
   clips can be selected at once** (they must not overlap or even touch, and
   are sorted by start frame); each chip has its own direction dropdown and a
   ✕ button to remove it; if the preview is not ready yet it is queued
