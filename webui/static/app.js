@@ -1709,20 +1709,48 @@ function setSegRepairPoint(which) {
 function updateSegRepairPickUi() {
   const pick = state.segRepairPick;
   if (!pick) return;
+  const job = findSegJob(pick.jobId);
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  const fwd = document.querySelector('input[name="seg-repair-dir"][value="forward"]');
+  const bwd = document.querySelector('input[name="seg-repair-dir"][value="backward"]');
   let hint;
   if (pick.a == null) {
     hint =
       "Play/scrub to a flawed frame, then press Set A (key A); press Set B " +
       "(key B) to widen the range (A=B = single frame).";
-  } else if (pick.b == null) {
-    hint = `Frame ${pick.a} (single frame - set B to widen the range)`;
+    if (fwd) fwd.disabled = false;
+    if (bwd) bwd.disabled = false;
   } else {
-    const s = Math.min(pick.a, pick.b);
-    const e = Math.max(pick.a, pick.b);
-    hint = `Frames ${s}-${e} (${e - s + 1} frame${e - s ? "s" : ""})`;
+    const a = pick.a;
+    const b = pick.b == null ? a : pick.b;
+    const s = Math.min(a, b);
+    const e = Math.max(a, b);
+    const noFwd = total > 0 && s === 0; // no saved frame before the range
+    const noBwd = total > 0 && e === total - 1; // no saved frame after the range
+    if (fwd) fwd.disabled = noFwd;
+    if (bwd) bwd.disabled = noBwd;
+    if (noFwd && fwd && fwd.checked && bwd && !bwd.disabled) {
+      fwd.checked = false;
+      bwd.checked = true;
+    } else if (noBwd && bwd && bwd.checked && fwd && !fwd.disabled) {
+      bwd.checked = false;
+      fwd.checked = true;
+    }
+    if (pick.b == null) {
+      hint = `Frame ${a} (single frame - set B to widen the range)`;
+    } else {
+      hint = `Frames ${s}-${e} (${e - s + 1} frame${e - s ? "s" : ""})`;
+    }
+    if (noFwd)
+      hint += " A is the first frame, so forward (previous-frame seed) is unavailable.";
+    if (noBwd)
+      hint += " B is the last frame, so backward (next-frame seed) is unavailable.";
   }
+  const usable = document.querySelector(
+    'input[name="seg-repair-dir"]:checked:not(:disabled)'
+  );
   $("seg-repair-range-hint").textContent = hint;
-  $("seg-repair-start").disabled = pick.a == null;
+  $("seg-repair-start").disabled = pick.a == null || !usable;
 }
 
 async function submitSegRepair() {

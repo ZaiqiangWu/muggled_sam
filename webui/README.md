@@ -220,6 +220,9 @@ Each finished job card has three buttons on the bottom right:
     seed; the range is re-tracked forward from it;
   - **backward** — the mask of the frame right after the range is used as the
     seed; the range is re-tracked backward from it.
+  A direction that has no seed frame is grayed out: if A is the first frame
+  (0), **forward** is unavailable; if B is the last frame, **backward** is
+  unavailable — the picker switches to the remaining direction automatically.
   Then **Start repair**. The preview mp4 is encoded at 30 fps with exactly
   one frame per mask frame, so the progress bar maps 1:1 to 0-based mask
   frame indices (the current frame under the playhead is shown next to the
