@@ -44,7 +44,8 @@ const state = {
   dirSelected: null,  // absolute path of selected entry (file or folder) in the Open dialog
   dirSelectedIsDir: null,
   segJobs: [],        // last segmentation queue snapshot (for button handlers)
-  segRepairJobId: null, // job whose repair dialog / repair preview is open
+  segRepairJobId: null, // job whose repair picker / repair preview is open
+  segRepairPick: null,  // { jobId, a, b }: A/B points set on the preview bar
 };
 
 // ------------------------------------------------------------------ helpers
@@ -1309,7 +1310,7 @@ function segRepairHtml(job) {
   }
   if (job.accepted || !job.has_tars) return "";
   return `<button class="seg-repair-open" data-id="${id}"
-    title="Repair isolated flawed frames: seed tracking from the previous or next frame's mask, re-track the range, then preview before accepting">Repair</button>`;
+    title="Repair isolated flawed frames: opens the preview video to set A/B points on the progress bar for the flawed range (A=B = single frame), pick a seed direction, then accept or discard the result">Repair</button>`;
 }
 
 function segJobHtml(job) {
@@ -1450,7 +1451,7 @@ function renderSegQueue(data) {
     btn.onclick = () => acceptSegJob(btn.dataset.id);
   });
   list.querySelectorAll(".seg-repair-open").forEach((btn) => {
-    btn.onclick = () => openSegRepairDialog(btn.dataset.id);
+    btn.onclick = () => openSegRepairPicker(btn.dataset.id);
   });
   list.querySelectorAll(".seg-repair-preview").forEach((btn) => {
     btn.onclick = () => openSegRepairPreview(btn.dataset.id);
@@ -1611,6 +1612,7 @@ function openSegPreview(job) {
   $("seg-preview-title").textContent =
     `Mask preview \u00b7 ${job.label || job.job_id}`;
   video.src = job.preview_url;
+  $("seg-repair-pick").style.display = "none";
   $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "flex";
   video.play().catch(() => { /* user can press play manually */ });
@@ -1621,8 +1623,10 @@ function closeSegPreview() {
   video.pause();
   video.removeAttribute("src");
   video.load(); // stop downloading
+  $("seg-repair-pick").style.display = "none";
   $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "none";
+  state.segRepairPick = null;
 }
 
 async function acceptSegJob(jobId) {
@@ -1659,43 +1663,84 @@ function findSegJob(jobId) {
   return (state.segJobs || []).find((j) => j.job_id === jobId) || null;
 }
 
-function openSegRepairDialog(jobId) {
+// Frame repair picker: set A/B points on the preview video's progress bar
+// (A=B = single frame) instead of typing frame numbers. The preview mp4 is
+// encoded at 30 fps with exactly one frame per mask frame, so the mp4
+// frame at time t maps 1:1 to mask frame index floor(t * 30).
+function openSegRepairPicker(jobId) {
   const job = findSegJob(jobId);
   if (!job) return;
+  if (!job.preview_url) {
+    toast("Preview is not ready yet - press Repair again when it is ready");
+    onPreviewClick(jobId);
+    return;
+  }
   state.segRepairJobId = jobId;
-  $("seg-repair-title").textContent =
-    `Repair flawed frames \u00b7 ${job.label || job.job_id}`;
-  $("seg-repair-total").textContent =
-    job.total_frames > 0 ? String(job.total_frames) : "?";
-  $("seg-repair-frames").value = "";
+  state.segRepairPick = { jobId, a: null, b: null };
   const fwd = document.querySelector('input[name="seg-repair-dir"][value="forward"]');
   if (fwd) fwd.checked = true;
-  $("seg-repair-dialog").style.display = "flex";
-  $("seg-repair-frames").focus();
+  const video = $("seg-preview-video");
+  $("seg-preview-title").textContent =
+    `Repair range \u00b7 ${job.label || job.job_id}`;
+  video.src = job.preview_url;
+  $("seg-repair-pick").style.display = "flex";
+  $("seg-repair-actions").style.display = "none";
+  $("seg-preview-dialog").style.display = "flex";
+  updateSegRepairPickUi();
+  video.play().catch(() => { /* user can press play manually */ });
 }
 
-function closeSegRepairDialog() {
-  $("seg-repair-dialog").style.display = "none";
-  state.segRepairJobId = null;
+function segRepairCursorFrame() {
+  const pick = state.segRepairPick;
+  const job = pick ? findSegJob(pick.jobId) : null;
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  const frame = Math.floor($("seg-preview-video").currentTime * 30 + 1e-6);
+  if (total <= 0) return frame;
+  return Math.max(0, Math.min(frame, total - 1));
+}
+
+function setSegRepairPoint(which) {
+  const pick = state.segRepairPick;
+  if (!pick) return;
+  pick[which] = segRepairCursorFrame();
+  updateSegRepairPickUi();
+}
+
+function updateSegRepairPickUi() {
+  const pick = state.segRepairPick;
+  if (!pick) return;
+  let hint;
+  if (pick.a == null) {
+    hint =
+      "Play/scrub to a flawed frame, then press Set A (key A); press Set B " +
+      "(key B) to widen the range (A=B = single frame).";
+  } else if (pick.b == null) {
+    hint = `Frame ${pick.a} (single frame - set B to widen the range)`;
+  } else {
+    const s = Math.min(pick.a, pick.b);
+    const e = Math.max(pick.a, pick.b);
+    hint = `Frames ${s}-${e} (${e - s + 1} frame${e - s ? "s" : ""})`;
+  }
+  $("seg-repair-range-hint").textContent = hint;
+  $("seg-repair-start").disabled = pick.a == null;
 }
 
 async function submitSegRepair() {
-  const jobId = state.segRepairJobId;
-  if (!jobId) return;
-  const frames = $("seg-repair-frames").value.trim();
-  if (!frames) {
-    toast("Enter a frame number or range first (e.g. 123 or 130-132)", true);
-    return;
-  }
+  const pick = state.segRepairPick;
+  if (!pick || pick.a == null) return;
+  const s = Math.min(pick.a, pick.b == null ? pick.a : pick.b);
+  const e = Math.max(pick.a, pick.b == null ? pick.a : pick.b);
+  const frames = s === e ? String(s) : s + "-" + e;
   const dirEl = document.querySelector('input[name="seg-repair-dir"]:checked');
   const direction = dirEl ? dirEl.value : "forward";
   try {
     await api("/api/seg/repair", {
       method: "POST",
-      body: { job_id: jobId, frames, direction },
+      body: { job_id: pick.jobId, frames, direction },
     });
-    closeSegRepairDialog();
-    toast("Frame repair started\u2026");
+    closeSegPreview();
+    state.segRepairPick = null;
+    toast(`Repair started: frame(s) ${frames}`);
     pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
@@ -1718,6 +1763,7 @@ function openSegRepairPreview(jobId) {
   $("seg-preview-title").textContent =
     `Repair preview \u00b7 ${job.label || job.job_id}`;
   video.src = job.repair_url;
+  $("seg-repair-pick").style.display = "none";
   $("seg-repair-actions").style.display = "flex";
   $("seg-preview-dialog").style.display = "flex";
   video.play().catch(() => { /* user can press play manually */ });
@@ -2077,32 +2123,33 @@ function wireSeg() {
     if (evt.target === $("seg-preview-dialog")) closeSegPreview();
   });
 
-  // frame repair dialog + accept/discard actions in the video dialog
-  $("seg-repair-cancel").onclick = closeSegRepairDialog;
-  $("seg-repair-ok").onclick = submitSegRepair;
+  // frame repair A/B picker + accept/discard actions in the video dialog
+  $("seg-repair-set-a").onclick = () => setSegRepairPoint("a");
+  $("seg-repair-set-b").onclick = () => setSegRepairPoint("b");
+  $("seg-repair-start").onclick = submitSegRepair;
   $("seg-repair-discard").onclick = () => {
     if (state.segRepairJobId) discardSegRepair(state.segRepairJobId);
   };
   $("seg-repair-accept").onclick = () => {
     if (state.segRepairJobId) acceptSegRepair(state.segRepairJobId);
   };
-  $("seg-repair-dialog").addEventListener("click", (evt) => {
-    if (evt.target === $("seg-repair-dialog")) closeSegRepairDialog();
-  });
-  $("seg-repair-frames").addEventListener("keydown", (evt) => {
-    if (evt.key === "Enter") submitSegRepair();
+  $("seg-preview-video").addEventListener("timeupdate", () => {
+    if (state.segRepairPick)
+      $("seg-repair-cursor").textContent = "frame " + segRepairCursorFrame();
   });
   document.addEventListener("keydown", (evt) => {
     if (evt.key === "Escape") {
-      if ($("seg-repair-dialog").style.display !== "none") {
-        closeSegRepairDialog();
-        return;
-      }
       if ($("seg-preview-dialog").style.display !== "none") {
         closeSegPreview();
         return;
       }
+      return;
     }
+    if (!state.segRepairPick) return;
+    const tag = (evt.target && evt.target.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
+    if (evt.key === "a" || evt.key === "A") setSegRepairPoint("a");
+    else if (evt.key === "b" || evt.key === "B") setSegRepairPoint("b");
   });
 }
 

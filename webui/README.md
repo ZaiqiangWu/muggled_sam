@@ -211,12 +211,19 @@ Each finished job card has three buttons on the bottom right:
   the window stays open). Requires `imageio` + `imageio-ffmpeg` (same as
   `util/multithread_video_writer.py`).
 - **Repair** — for isolated flawed frames (the mask breaks on a frame or
-  short range, then tracking recovers). Opens a dialog to enter the frame
-  number / range (0-based, e.g. `123` or `130-132`) and a direction:
+  short range, then tracking recovers). Opens the preview video with an
+  **A/B point picker**: play or scrub to the start of the flawed range and
+  press **Set A** (keyboard `A`), then press **Set B** (keyboard `B`) at the
+  end of the range — A and B on the same frame = single-frame repair; if the
+  preview is not ready yet it is queued automatically. Pick a direction:
   - **forward** — the mask of the frame right before the range is used as the
     seed; the range is re-tracked forward from it;
   - **backward** — the mask of the frame right after the range is used as the
     seed; the range is re-tracked backward from it.
+  Then **Start repair**. The preview mp4 is encoded at 30 fps with exactly
+  one frame per mask frame, so the progress bar maps 1:1 to 0-based mask
+  frame indices (the current frame under the playhead is shown next to the
+  Set A / Set B buttons).
 
   Mechanically this seeds a fresh tracking run with
   `initialize_from_mask(encoded_seed_frame, saved_mask)` and steps the range

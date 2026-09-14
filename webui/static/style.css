@@ -578,6 +578,7 @@ input[type="range"] { width: 100%; }
 }
 .video-modal-close:hover { color: var(--danger); background: var(--panel2); }
 #seg-repair-actions { margin-top: 8px; }
+#seg-repair-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 #seg-preview-video {
   display: block;
   width: 100%;
