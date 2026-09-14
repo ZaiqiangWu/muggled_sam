@@ -2900,7 +2900,7 @@ class SegmentationQueue:
                         osp.join(staging, f"obj{objidx:02d}", f"{frame_idx:08d}.png"),
                         cv2.IMREAD_UNCHANGED,
                     )
-                    if data is None or data.ndim < 4:
+                    if data is None or data.ndim != 3 or data.shape[2] < 4:
                         raise ValueError(
                             f"Failed to read repaired frame {frame_idx} (object {objidx + 1})"
                         )
