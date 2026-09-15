@@ -1959,7 +1959,7 @@ function openSegRepairPicker(jobId) {
   renderSegRepairClips();
   updateSegRepairPickUi();
   setSegRepairFrame(0, { pause: false });
-  setSegRepairFramePlaying(true);
+  setSegRepairFramePlaying(false);
 }
 
 function segRepairCursorFrame() {
