@@ -870,8 +870,11 @@ const TOOLS = ["hover", "box", "fg", "bg"];
 document.addEventListener("keydown", (evt) => {
   // The repair picker owns its playback, A/D/S and arrow keys while it is open. Let its
   // later listener handle them instead of changing authoring tools/buffers.
-  if (state.segRepairPick && $("seg-preview-dialog").style.display !== "none" &&
-      [" ", "ArrowLeft", "ArrowRight", "a", "A", "d", "D", "s", "S"].includes(evt.key)) return;
+  const repairDialogOpen = (state.segRepairPick ||
+    $("seg-repair-actions").style.display !== "none") &&
+    $("seg-preview-dialog").style.display !== "none";
+  if (repairDialogOpen &&
+      [" ", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "a", "A", "d", "D", "s", "S"].includes(evt.key)) return;
   const tag = (evt.target && evt.target.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
@@ -1753,6 +1756,7 @@ function findSegJob(jobId) {
 
 const REPAIR_FRAME_PREFETCH_RADIUS = 30;
 const REPAIR_FRAME_PREFETCH_CONCURRENCY = 6;
+const REPAIR_PLAYBACK_RATES = [0.25, 0.5, 1];
 // Keep a little more than the active prefetch window, so rapid back-and-forth
 // stepping stays instant without retaining every PNG visited in a long video.
 const REPAIR_FRAME_CACHE_RADIUS = REPAIR_FRAME_PREFETCH_RADIUS * 2;
@@ -1905,6 +1909,18 @@ function setSegRepairFramePlaying(playing) {
   state.segRepairFramesPlaying = true;
   $("seg-repair-frame-play").textContent = "Pause";
   scheduleSegRepairFramePlayback();
+}
+
+function setSegRepairPlaybackRate(rate) {
+  state.segRepairPlaybackRate = REPAIR_PLAYBACK_RATES.includes(rate) ? rate : 1;
+  $("seg-repair-speed").value = String(state.segRepairPlaybackRate);
+  if (state.segRepairUseFrames) {
+    // Restart the frame clock so the speed takes effect without waiting for
+    // the interval that was scheduled at the previous rate.
+    if (state.segRepairFramesPlaying) setSegRepairFramePlaying(true);
+  } else {
+    $("seg-preview-video").playbackRate = state.segRepairPlaybackRate;
+  }
 }
 
 // Frame repair picker: set A/D points on the preview-frame progress bar
@@ -2113,7 +2129,9 @@ function commitDraftClip() {
   }
   let direction = "forward";
   if (total > 0 && s === 0) direction = "backward";
-  pick.clips.push({ s, e, direction });
+  // Keep the most recently marked range nearest the controls. Timeline
+  // markers still use each clip's actual frame position.
+  pick.clips.unshift({ s, e, direction });
   // Do not select the new clip automatically: after Set D, Space should play
   // forward from B, not loop back to A.
   state.segRepairSelectedClipIdx = null;
@@ -2733,13 +2751,7 @@ function wireSeg() {
     }
   });
   $("seg-repair-speed").onchange = () => {
-    const rate = Number($("seg-repair-speed").value);
-    state.segRepairPlaybackRate = [1, 0.5, 0.25].includes(rate) ? rate : 1;
-    if (state.segRepairUseFrames) {
-      if (state.segRepairFramesPlaying) setSegRepairFramePlaying(true);
-    } else {
-      $("seg-preview-video").playbackRate = state.segRepairPlaybackRate;
-    }
+    setSegRepairPlaybackRate(Number($("seg-repair-speed").value));
   };
   $("seg-repair-frame-play").onclick = () => {
     if (state.segRepairUseFrames) {
@@ -2796,8 +2808,22 @@ function wireSeg() {
       }
       return;
     }
-    if (!state.segRepairPick) return;
+    const repairPreviewOpen = $("seg-preview-dialog").style.display !== "none" &&
+      $("seg-repair-actions").style.display !== "none";
+    if (!state.segRepairPick && !repairPreviewOpen) return;
     const tag = (evt.target && evt.target.tagName) || "";
+    if (evt.key === "ArrowUp" || evt.key === "ArrowDown") {
+      evt.preventDefault();
+      const current = REPAIR_PLAYBACK_RATES.indexOf(state.segRepairPlaybackRate);
+      const step = evt.key === "ArrowUp" ? 1 : -1;
+      const index = Math.max(0, Math.min(
+        REPAIR_PLAYBACK_RATES.length - 1,
+        (current < 0 ? REPAIR_PLAYBACK_RATES.length - 1 : current) + step
+      ));
+      setSegRepairPlaybackRate(REPAIR_PLAYBACK_RATES[index]);
+      return;
+    }
+    if (!state.segRepairPick) return;
     if (evt.key === " ") {
       evt.preventDefault();
       if (state.segRepairUseFrames) {

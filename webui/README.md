@@ -222,8 +222,8 @@ Each finished job card has three buttons on the bottom right:
   single-frame clip at the current frame. Use the **Playback speed** selector
   to play at ×1, ×0.5, or ×0.25. Click a chip or its timeline range to select and loop that clip;
   click its ✕ to remove it. Repeat Set A / Set D to add more clips — **several
-  clips can be selected at once** (they must not overlap or even touch, and
-  are sorted by start frame); each chip has its own direction dropdown and a
+  clips can be selected at once** (they must not overlap or even touch; the
+  newest marked clip appears first); each chip has its own direction dropdown and a
   ✕ button to remove it; if the preview is not ready yet it is queued
   automatically. Per clip, pick a direction:
   - **forward** — the mask of the frame right before the range is used as the
