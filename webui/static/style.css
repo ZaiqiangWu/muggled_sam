@@ -678,6 +678,18 @@ input[type="range"] { width: 100%; }
   border-radius: 6px;
   object-fit: contain;
 }
+#seg-repair-frame-image {
+  /* Preview PNGs are RGBA masks. Show transparent pixels as a familiar
+     checkerboard rather than the video's black letterbox background. */
+  background-color: #9b9b9b;
+  background-image:
+    linear-gradient(45deg, #bdbdbd 25%, transparent 25%),
+    linear-gradient(-45deg, #bdbdbd 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #bdbdbd 75%),
+    linear-gradient(-45deg, transparent 75%, #bdbdbd 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+}
 .video-modal-foot {
   display: flex;
   align-items: center;
