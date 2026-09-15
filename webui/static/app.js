@@ -2826,7 +2826,12 @@ function wireSeg() {
       renderSegRepairTimeline();
       return;
     }
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    // The timeline scrubber is an input[type=range]. It must not disable the
+    // Repair shortcuts simply because it still owns focus after a drag.
+    // Preserve normal typing/selection behavior for actual editable fields.
+    const inputType = (evt.target && evt.target.type || "").toLowerCase();
+    if (tag === "TEXTAREA" || tag === "SELECT" ||
+        (tag === "INPUT" && inputType !== "range" && inputType !== "button")) return;
     if (evt.key === "a" || evt.key === "A") {
       evt.preventDefault();
       toggleSegRepairA();
