@@ -329,6 +329,9 @@ output layout as the script.
 - `POST /api/seg/repair/accept` — `{job_id, clip: N, rewrite_tar: false}`
   apply clip N's repair: corresponding preview PNG frames always, tar(s) only
   when `rewrite_tar` is true; regenerate the full preview mp4 separately
+- `POST /api/seg/repair/accept_all` — `{job_id, rewrite_tar: false}` apply
+  all pending repair clips serially; completed clips remain accepted if a
+  later clip fails
 - `POST /api/seg/repair/discard` — `{job_id, clip: N}` throw away clip N's
   pending repair
 - `POST /api/seg/accept` — `{job_id}` move frames to `./videos/<garment>/<name>/`

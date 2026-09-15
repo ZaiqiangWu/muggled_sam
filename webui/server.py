@@ -3266,7 +3266,8 @@ class SegmentationQueue:
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
-    def _apply_repair(self, job, clip, objects, rewrite_tar=False):
+    def _apply_repair(self, job, clip, objects, rewrite_tar=False,
+                      keep_accepting=False):
         """Apply one repair by overwriting only its preview PNG frames.
 
         The full preview MP4 is intentionally left untouched until the user
@@ -3342,10 +3343,13 @@ class SegmentationQueue:
             any_pending = any(
                 c["status"] == "pending" for c in job.repair_clips
             )
-            job.repair_status = "ready" if any_pending else "none"
+            job.repair_status = (
+                "accepting" if keep_accepting else
+                ("ready" if any_pending else "none")
+            )
             job.repair_progress = 1.0
             job.repair_error = None
-            job.repair_phase = None
+            job.repair_phase = "Applying the next repair clip" if keep_accepting else None
             job.repair_active_clip = None
             job.preview_needs_regen = True
             job.message = (
@@ -3421,6 +3425,49 @@ class SegmentationQueue:
         ).start()
         return job.to_dict()
 
+    def accept_all_repairs(self, job_id, rewrite_tar=False):
+        """Apply every pending repair clip serially in one background task.
+
+        Clips all modify the same preview-PNG directory, so they deliberately
+        share one I/O lock rather than racing in parallel. If one fails, the
+        completed clips stay accepted and the remaining clips stay retryable.
+        """
+        with self._lock:
+            job = self._by_id.get(job_id)
+            if job is None:
+                raise ValueError(f"No such job: {job_id}")
+            if job.status != "done":
+                raise ValueError("Only finished jobs support frame repair")
+            if job.repair_status == "running":
+                raise ValueError("The repair is still running - wait for it to finish")
+            if job.repair_status == "accepting" or getattr(job, "_repair_accepting", False):
+                raise ValueError("Repair accept is already in progress for this job")
+            job._repair_load_meta()
+            clips = [c for c in job.repair_clips if c["status"] == "pending"]
+            if not clips:
+                raise ValueError("No pending repairs to accept - refresh and try again")
+            meta_path = osp.join(job.repair_staging_dir(), "meta.json")
+            if not osp.isfile(meta_path):
+                raise ValueError("No pending repair to accept - start a repair first")
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh)
+            objects = [int(o) for o in meta.get("objects", [])]
+            if not objects:
+                raise ValueError("Repair metadata is empty - start a repair first")
+            job._repair_accepting = True
+            job.repair_status = "accepting"
+            job.repair_progress = 0.0
+            job.repair_error = None
+            job.repair_phase = f"Applying 1 of {len(clips)} repair clips"
+            job.repair_active_clip = clips[0]["index"]
+        threading.Thread(
+            target=self._run_accept_all_repairs,
+            args=(job, clips, objects, bool(rewrite_tar)),
+            name=f"seg-repair-accept-all-{job.job_id}",
+            daemon=True,
+        ).start()
+        return job.to_dict()
+
     def _run_accept_repair(self, job, clip, objects, rewrite_tar):
         """Background worker for accept_repair. Re-encoding the preview mp4
         can take a while on long videos, so the HTTP request returns right
@@ -3442,6 +3489,54 @@ class SegmentationQueue:
                 job.repair_active_clip = None
                 # keep the pending clips retryable while their staging data
                 # is still on disk; otherwise mark the repair failed
+                if osp.isfile(osp.join(job.repair_staging_dir(), "meta.json")):
+                    any_pending = any(
+                        c["status"] == "pending" for c in job.repair_clips
+                    )
+                    job.repair_status = "ready" if any_pending else "error"
+                    if any_pending:
+                        job.repair_progress = 1.0
+                else:
+                    job.repair_status = "error"
+        finally:
+            with self._lock:
+                job._repair_accepting = False
+
+    def _run_accept_all_repairs(self, job, clips, objects, rewrite_tar):
+        """Worker counterpart of accept_all_repairs; see its docstring."""
+        try:
+            with job._repair_io_lock:
+                for number, clip in enumerate(clips, start=1):
+                    if job.cancel_requested():
+                        raise RepairCancelled("Repair was cancelled for deletion")
+                    with self._lock:
+                        job.repair_status = "accepting"
+                        job.repair_progress = (number - 1) / len(clips)
+                        job.repair_phase = (
+                            f"Applying {number} of {len(clips)} repair clips"
+                        )
+                        job.repair_active_clip = clip["index"]
+                    self._apply_repair(
+                        job, clip, objects, rewrite_tar,
+                        keep_accepting=number < len(clips),
+                    )
+                    if number < len(clips):
+                        with self._lock:
+                            job.repair_status = "accepting"
+                            job.repair_progress = number / len(clips)
+                            job.repair_phase = (
+                                f"Applied {number} of {len(clips)} repair clips"
+                            )
+                            job.repair_active_clip = clips[number]["index"]
+                            self._persist_finished()
+        except RepairCancelled:
+            return
+        except Exception as err:  # noqa: BLE001
+            traceback.print_exc()
+            with self._lock:
+                job.repair_error = f"{type(err).__name__}: {err}"
+                job.repair_phase = None
+                job.repair_active_clip = None
                 if osp.isfile(osp.join(job.repair_staging_dir(), "meta.json")):
                     any_pending = any(
                         c["status"] == "pending" for c in job.repair_clips
@@ -4304,6 +4399,11 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("job_id"),
                 int(body.get("clip", 0)),
                 bool(body.get("rewrite_tar", False)),
+            )
+            return self._send_json({"ok": True, "job": job})
+        if route == "/api/seg/repair/accept_all":
+            job = SEG_QUEUE.accept_all_repairs(
+                body.get("job_id"), bool(body.get("rewrite_tar", False))
             )
             return self._send_json({"ok": True, "job": job})
         if route == "/api/seg/repair/discard":

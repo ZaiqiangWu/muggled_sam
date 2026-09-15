@@ -1362,6 +1362,10 @@ function segRepairHtml(job) {
     let html = pending.map((c) => `
       <button class="seg-repair-preview" data-id="${id}" data-clip="${c.index}"
         title="Play the repaired preview for frames ${escHtml(segClipRangeText(c))} - then Accept or Discard this clip in the dialog">&#x25B6; ${escHtml(segClipRangeText(c))}</button>`).join("");
+    if (pending.length > 1) {
+      html += `<button class="seg-repair-accept-all" data-id="${id}"
+        title="Apply all ${pending.length} pending repairs to the preview PNG frames">Accept all repairs</button>`;
+    }
     html += `<span class="seg-repair-chip"
       title="Pending repair clips (not applied yet): ${escHtml(pending.map(segClipRangeText).join(", "))}">pending: ${escHtml(pending.map(segClipRangeText).join(", "))}</span>`;
     html += acceptedChip;
@@ -1515,6 +1519,9 @@ function renderSegQueue(data) {
   list.querySelectorAll(".seg-repair-preview").forEach((btn) => {
     btn.onclick = () =>
       openSegRepairPreview(btn.dataset.id, +(btn.dataset.clip || 0));
+  });
+  list.querySelectorAll(".seg-repair-accept-all").forEach((btn) => {
+    btn.onclick = () => acceptAllSegRepairs(btn.dataset.id);
   });
   list.querySelectorAll(".seg-delete").forEach((btn) => {
     btn.onclick = () => deleteSegJob(btn.dataset.id);
@@ -2314,6 +2321,28 @@ async function acceptSegRepair(jobId, clipIndex, rewriteTar = false) {
     });
     closeSegPreview();
     toast("Repair accepted - applying\u2026");
+    pollSegStatus();
+  } catch (err) {
+    toast(err.message || String(err), true);
+  } finally {
+    state.segRepairAccepting = false;
+  }
+}
+
+async function acceptAllSegRepairs(jobId) {
+  if (state.segRepairAccepting) return;
+  const job = findSegJob(jobId);
+  if (job && job.repair_status === "accepting") {
+    toast("The repairs are already being applied - progress shows on the job row");
+    return;
+  }
+  state.segRepairAccepting = true;
+  try {
+    await api("/api/seg/repair/accept_all", {
+      method: "POST",
+      body: { job_id: jobId },
+    });
+    toast("All pending repairs accepted - applying…");
     pollSegStatus();
   } catch (err) {
     toast(err.message || String(err), true);
