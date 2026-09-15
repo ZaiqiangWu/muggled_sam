@@ -219,7 +219,8 @@ Each finished job card has three buttons on the bottom right:
   under the picker and as a marked range on the repair timeline). While the
   picker is open, use `←` / `→` to pause and move exactly one frame at a
   time. Press `A` again to cancel the draft A marker; press `S` to create a
-  single-frame clip at the current frame. Click a chip or its timeline range to select and loop that clip;
+  single-frame clip at the current frame. Use the **Playback speed** selector
+  to play at ×1, ×0.5, or ×0.25. Click a chip or its timeline range to select and loop that clip;
   click its ✕ to remove it. Repeat Set A / Set D to add more clips — **several
   clips can be selected at once** (they must not overlap or even touch, and
   are sorted by start frame); each chip has its own direction dropdown and a
@@ -232,10 +233,12 @@ Each finished job card has three buttons on the bottom right:
   A direction that has no seed frame is grayed out: if a clip starts at the
   first frame (0), **forward** is unavailable; if a clip ends at the last
   frame, **backward** is unavailable — the picker switches to the remaining
-  direction automatically. Then **Start repair**. The preview mp4 is encoded
-  at 30 fps with exactly one frame per mask frame, so the progress bar maps
-  1:1 to 0-based mask frame indices (the current frame under the playhead is
-  shown next to the Set A / Set D buttons).
+  direction automatically. Then **Start repair**. The picker reads the
+  generated preview PNGs directly (rather than seeking in the preview mp4)
+  and retains the current frame plus roughly 30 frames on either side in the
+  browser cache. Its progress bar maps 1:1 to 0-based mask frame indices (the
+  current frame under the playhead is shown next to the Set A / Set D
+  buttons).
 
   Mechanically each clip seeds a fresh tracking run with
   `initialize_from_mask(encoded_seed_frame, saved_mask)` and steps its range
@@ -316,6 +319,8 @@ output layout as the script.
   generation; returns `queued: true` when the job waits behind another
   preview
 - `GET  /api/seg/preview_video?job_id=` — stream the preview mp4 (Range-aware)
+- `GET  /api/seg/repair_frame?job_id=&frame=N` — return preview PNG frame N
+  for the Repair picker
 - `POST /api/seg/repair` — `{job_id, clips: [{frames, direction:
   forward|backward}, …]}` start a frame repair for one or more clips (runs in
   the background; per-clip previews appear in the job poll)

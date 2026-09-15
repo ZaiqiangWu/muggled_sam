@@ -4186,6 +4186,25 @@ class Handler(BaseHTTPRequestHandler):
                     status=404,
                 )
             return self._send_file_range(mp4, "video/mp4")
+        if route == "/api/seg/repair_frame":
+            job_id = (qs.get("job_id") or [""])[0]
+            raw_frame = (qs.get("frame") or [""])[0]
+            job = SEG_QUEUE.get_job(job_id)
+            try:
+                frame_idx = int(raw_frame)
+            except (TypeError, ValueError):
+                frame_idx = -1
+            if (
+                job is None
+                or job.status != "done"
+                or frame_idx < 0
+                or frame_idx >= int(job.total_frames or 0)
+            ):
+                return self._send_json({"ok": False, "error": "Preview frame not found"}, status=404)
+            png = osp.join(job.preview_png_dir(), f"{frame_idx:08d}.png")
+            if not osp.isfile(png):
+                return self._send_json({"ok": False, "error": "Preview frame not found"}, status=404)
+            return self._send_file(png, "image/png")
         if route == "/api/seg/browse":
             path = (qs.get("path") or [""])[0]
             kind = (qs.get("kind") or ["video"])[0]

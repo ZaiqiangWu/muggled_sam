@@ -52,6 +52,16 @@ const state = {
   // currentTime changes asynchronously.  Keep the requested frame separately
   // so held ArrowRight advances from the last request, not a stale decoded frame.
   segRepairTargetFrame: null,
+  segRepairPlaybackRate: 1,
+  // The A/D picker uses pre-fetched PNG frames instead of MP4 seeking.
+  segRepairUseFrames: false,
+  segRepairFramesPlaying: false,
+  segRepairFrameTimer: null,
+  segRepairFrameCache: new Map(),
+  segRepairFrameLoading: new Map(),
+  segRepairFrameQueue: [],
+  segRepairFrameQueued: new Set(),
+  segRepairFrameEpoch: 0,
   segRepairClipIdx: null,  // clip index shown in the repair preview dialog
   segRepairAccepting: false, // accept request in flight (client-side guard)
 };
@@ -1359,7 +1369,7 @@ function segRepairHtml(job) {
   }
   if (job.accepted || !job.has_tars) return acceptedChip;
   return `<button class="seg-repair-open" data-id="${id}"
-    title="Repair isolated flawed frames: opens the preview video to set A/D points on the progress bar; each A/D pair becomes one repair clip that can be accepted or discarded separately">Repair</button>${acceptedChip}`;
+    title="Repair isolated flawed frames: opens the preview-frame picker to set A/D points on the progress bar; each A/D pair becomes one repair clip that can be accepted or discarded separately">Repair</button>${acceptedChip}`;
 }
 
 function segJobHtml(job) {
@@ -1664,22 +1674,32 @@ async function onPreviewClick(jobId) {
 }
 
 function openSegPreview(job) {
+  clearSegRepairFrameCache();
+  state.segRepairUseFrames = false;
   const video = $("seg-preview-video");
+  $("seg-repair-frame-image").style.display = "none";
+  video.style.display = "block";
   $("seg-preview-title").textContent =
     `Mask preview \u00b7 ${job.label || job.job_id}`;
   video.src = job.preview_url;
   $("seg-repair-pick").style.display = "none";
+  $("seg-repair-speed-row").style.display = "none";
+  $("seg-repair-frame-play").style.display = "none";
   $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "flex";
   video.play().catch(() => { /* user can press play manually */ });
 }
 
 function closeSegPreview() {
+  clearSegRepairFrameCache();
+  state.segRepairUseFrames = false;
   const video = $("seg-preview-video");
   video.pause();
   video.removeAttribute("src");
   video.load(); // stop downloading
   $("seg-repair-pick").style.display = "none";
+  $("seg-repair-speed-row").style.display = "none";
+  $("seg-repair-frame-play").style.display = "none";
   $("seg-repair-timeline").style.display = "none";
   $("seg-repair-clips").style.display = "none";
   $("seg-repair-actions").style.display = "none";
@@ -1724,10 +1744,165 @@ function findSegJob(jobId) {
   return (state.segJobs || []).find((j) => j.job_id === jobId) || null;
 }
 
-// Frame repair picker: set A/D points on the preview video's progress bar
-// (S creates a single frame) instead of typing frame numbers. The preview mp4 is
-// encoded at 30 fps with exactly one frame per mask frame, so the mp4
-// frame at time t maps 1:1 to mask frame index floor(t * 30).
+const REPAIR_FRAME_PREFETCH_RADIUS = 30;
+const REPAIR_FRAME_PREFETCH_CONCURRENCY = 6;
+// Keep a little more than the active prefetch window, so rapid back-and-forth
+// stepping stays instant without retaining every PNG visited in a long video.
+const REPAIR_FRAME_CACHE_RADIUS = REPAIR_FRAME_PREFETCH_RADIUS * 2;
+
+function stopSegRepairFramePlayback() {
+  state.segRepairFramesPlaying = false;
+  if (state.segRepairFrameTimer != null) {
+    clearTimeout(state.segRepairFrameTimer);
+    state.segRepairFrameTimer = null;
+  }
+  const button = $("seg-repair-frame-play");
+  if (button) button.textContent = "Play";
+}
+
+function clearSegRepairFrameCache() {
+  stopSegRepairFramePlayback();
+  state.segRepairFrameEpoch += 1;
+  for (const url of state.segRepairFrameCache.values()) URL.revokeObjectURL(url);
+  state.segRepairFrameCache.clear();
+  state.segRepairFrameLoading.clear();
+  state.segRepairFrameQueue = [];
+  state.segRepairFrameQueued.clear();
+  // Do not briefly show a revoked/previous job frame while the first PNG of
+  // the newly opened picker is being fetched.
+  const image = $("seg-repair-frame-image");
+  if (image) image.removeAttribute("src");
+}
+
+function repairFrameUrl(jobId, frame) {
+  return `/api/seg/repair_frame?job_id=${encodeURIComponent(jobId)}&frame=${frame}`;
+}
+
+function trimSegRepairFrameCache(center) {
+  for (const [frame, url] of state.segRepairFrameCache) {
+    if (Math.abs(frame - center) > REPAIR_FRAME_CACHE_RADIUS) {
+      URL.revokeObjectURL(url);
+      state.segRepairFrameCache.delete(frame);
+    }
+  }
+  // Discard obsolete queued work as well. Requests already in flight are
+  // allowed to finish, but their result will be evicted on the next movement.
+  const kept = [];
+  for (const frame of state.segRepairFrameQueue) {
+    if (Math.abs(frame - center) <= REPAIR_FRAME_CACHE_RADIUS) kept.push(frame);
+    else state.segRepairFrameQueued.delete(frame);
+  }
+  state.segRepairFrameQueue = kept;
+}
+
+function pumpSegRepairFrameQueue() {
+  while (state.segRepairFrameLoading.size < REPAIR_FRAME_PREFETCH_CONCURRENCY &&
+         state.segRepairFrameQueue.length) {
+    const frame = state.segRepairFrameQueue.shift();
+    state.segRepairFrameQueued.delete(frame);
+    const pick = state.segRepairPick;
+    if (!pick || state.segRepairFrameCache.has(frame) || state.segRepairFrameLoading.has(frame)) continue;
+    const epoch = state.segRepairFrameEpoch;
+    const request = fetch(repairFrameUrl(pick.jobId, frame))
+      .then((res) => {
+        if (!res.ok) throw new Error(`Could not load preview frame ${frame}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        if (epoch !== state.segRepairFrameEpoch || !state.segRepairPick ||
+            state.segRepairPick.jobId !== pick.jobId) return null;
+        const url = URL.createObjectURL(blob);
+        state.segRepairFrameCache.set(frame, url);
+        // The current frame may have been waiting in the queue when its
+        // request was started. Paint it here too, not only in the caller that
+        // happened to see an already-in-flight request.
+        if (state.segRepairUseFrames && state.segRepairTargetFrame === frame) {
+          $("seg-repair-frame-image").src = url;
+        }
+        return url;
+      })
+      .catch(() => null)
+      .finally(() => {
+        // A dialog can close and reopen before this request settles. Do not
+        // erase a newer request for the same frame from the new cache epoch.
+        if (state.segRepairFrameLoading.get(frame) === request) {
+          state.segRepairFrameLoading.delete(frame);
+        }
+        pumpSegRepairFrameQueue();
+      });
+    state.segRepairFrameLoading.set(frame, request);
+  }
+}
+
+function queueSegRepairFrames(center) {
+  const pick = state.segRepairPick;
+  const job = pick ? findSegJob(pick.jobId) : null;
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  if (!pick || total <= 0) return;
+  trimSegRepairFrameCache(center);
+  const requested = [];
+  for (let delta = 0; delta <= REPAIR_FRAME_PREFETCH_RADIUS; delta++) {
+    for (const frame of delta ? [center - delta, center + delta] : [center]) {
+      if (frame < 0 || frame >= total || state.segRepairFrameCache.has(frame) ||
+          state.segRepairFrameLoading.has(frame) || state.segRepairFrameQueued.has(frame)) continue;
+      requested.push(frame);
+      state.segRepairFrameQueued.add(frame);
+    }
+  }
+  // Newly selected frames take priority over an older prefetch window.
+  state.segRepairFrameQueue = requested.concat(state.segRepairFrameQueue);
+  pumpSegRepairFrameQueue();
+}
+
+function showSegRepairFrame(frame) {
+  const image = $("seg-repair-frame-image");
+  const pick = state.segRepairPick;
+  if (!pick) return;
+  queueSegRepairFrames(frame);
+  const cached = state.segRepairFrameCache.get(frame);
+  if (cached) {
+    image.src = cached;
+    return;
+  }
+  const loading = state.segRepairFrameLoading.get(frame);
+  if (loading) {
+    loading.then((url) => {
+      if (url && state.segRepairUseFrames && state.segRepairTargetFrame === frame) {
+        image.src = url;
+      }
+    });
+  }
+}
+
+function scheduleSegRepairFramePlayback() {
+  if (!state.segRepairUseFrames || !state.segRepairFramesPlaying) return;
+  const pick = state.segRepairPick;
+  const job = pick ? findSegJob(pick.jobId) : null;
+  const total = job && job.total_frames > 0 ? job.total_frames : 0;
+  if (total <= 0) return stopSegRepairFramePlayback();
+  const delay = 1000 / (30 * state.segRepairPlaybackRate);
+  state.segRepairFrameTimer = setTimeout(() => {
+    if (!state.segRepairFramesPlaying || !state.segRepairPick) return;
+    const clip = pick.clips[state.segRepairSelectedClipIdx];
+    let next = (state.segRepairTargetFrame || 0) + 1;
+    if (clip && next > clip.e) next = clip.s;
+    else if (next >= total) return stopSegRepairFramePlayback();
+    setSegRepairFrame(next, { pause: false });
+    scheduleSegRepairFramePlayback();
+  }, delay);
+}
+
+function setSegRepairFramePlaying(playing) {
+  stopSegRepairFramePlayback();
+  if (!playing) return;
+  state.segRepairFramesPlaying = true;
+  $("seg-repair-frame-play").textContent = "Pause";
+  scheduleSegRepairFramePlayback();
+}
+
+// Frame repair picker: set A/D points on the preview-frame progress bar
+// (S creates a single frame) instead of typing frame numbers. It shows the
+// generated PNG directly, avoiding video seek/decode latency.
 function openSegRepairPicker(jobId) {
   const job = findSegJob(jobId);
   if (!job) return;
@@ -1741,21 +1916,33 @@ function openSegRepairPicker(jobId) {
   state.segRepairPick = { jobId, a: null, b: null, clips: [] };
   state.segRepairSelectedClipIdx = null;
   state.segRepairTargetFrame = 0;
+  clearSegRepairFrameCache();
+  state.segRepairUseFrames = true;
   const video = $("seg-preview-video");
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  video.style.display = "none";
+  $("seg-repair-frame-image").style.display = "block";
   $("seg-preview-title").textContent =
     `Repair range \u00b7 ${job.label || job.job_id}`;
-  video.src = job.preview_url;
   $("seg-repair-pick").style.display = "flex";
+  $("seg-repair-speed-row").style.display = "flex";
+  $("seg-repair-frame-play").style.display = "";
   $("seg-repair-timeline").style.display = "flex";
   $("seg-repair-clips").style.display = "flex";
   $("seg-repair-actions").style.display = "none";
   $("seg-preview-dialog").style.display = "flex";
   renderSegRepairClips();
   updateSegRepairPickUi();
-  video.play().catch(() => { /* user can press play manually */ });
+  setSegRepairFrame(0, { pause: false });
+  setSegRepairFramePlaying(true);
 }
 
 function segRepairCursorFrame() {
+  if (state.segRepairUseFrames && Number.isInteger(state.segRepairTargetFrame)) {
+    return state.segRepairTargetFrame;
+  }
   const pick = state.segRepairPick;
   const job = pick ? findSegJob(pick.jobId) : null;
   const total = job && job.total_frames > 0 ? job.total_frames : 0;
@@ -1770,6 +1957,14 @@ function setSegRepairFrame(frame, { pause = true } = {}) {
   const total = job && job.total_frames > 0 ? job.total_frames : 0;
   if (total <= 0) return;
   const safeFrame = Math.max(0, Math.min(Math.round(frame), total - 1));
+  if (state.segRepairUseFrames) {
+    state.segRepairTargetFrame = safeFrame;
+    showSegRepairFrame(safeFrame);
+    $("seg-repair-scrubber").value = String(safeFrame);
+    $("seg-repair-cursor").textContent = "frame " + safeFrame;
+    $("seg-repair-timeline-label").textContent = `frame ${safeFrame} / ${total - 1}`;
+    return;
+  }
   const video = $("seg-preview-video");
   if (pause) video.pause();
   // Assign on every range `input` event.  Do not wait for `change` (which
@@ -1793,7 +1988,10 @@ function selectSegRepairClip(index, { play = true } = {}) {
   setSegRepairFrame(clip.s);
   renderSegRepairClips();
   renderSegRepairTimeline();
-  if (play) $("seg-preview-video").play().catch(() => {});
+  if (play) {
+    if (state.segRepairUseFrames) setSegRepairFramePlaying(true);
+    else $("seg-preview-video").play().catch(() => {});
+  }
 }
 
 function renderSegRepairTimeline() {
@@ -1816,7 +2014,8 @@ function renderSegRepairTimeline() {
   // snapping the progress thumb back to the last decoded frame (often A
   // immediately after setting D).
   const video = $("seg-preview-video");
-  const displayFrame = video.paused && Number.isInteger(state.segRepairTargetFrame)
+  const isPaused = state.segRepairUseFrames ? !state.segRepairFramesPlaying : video.paused;
+  const displayFrame = isPaused && Number.isInteger(state.segRepairTargetFrame)
     ? state.segRepairTargetFrame
     : segRepairCursorFrame();
   scrubber.value = String(displayFrame);
@@ -2058,6 +2257,8 @@ function openSegRepairPreview(jobId, clipIndex) {
   const clip = pending.find((c) => c.index === clipIndex) || pending[0];
   state.segRepairJobId = jobId;
   state.segRepairClipIdx = clip.index;
+  clearSegRepairFrameCache();
+  state.segRepairUseFrames = false;
   const applying = job.repair_status === "accepting";
   $("seg-repair-accept").style.display = applying ? "none" : "";
   $("seg-repair-discard").style.display = applying ? "none" : "";
@@ -2083,10 +2284,15 @@ function openSegRepairPreview(jobId, clipIndex) {
     : `Frames ${rangeText} re-tracked from the ${seedText}.` + clipText +
       "Accept applies this clip's preview PNG frames; Regenerate refreshes the full preview video. Discard keeps the original result.";
   const video = $("seg-preview-video");
+  $("seg-repair-frame-image").style.display = "none";
+  video.style.display = "block";
+  $("seg-repair-frame-play").style.display = "none";
+  video.playbackRate = state.segRepairPlaybackRate;
   $("seg-preview-title").textContent =
     `Repair preview \u00b7 ${job.label || job.job_id} \u00b7 clip ${rangeText}`;
   video.src = clip.url;
   $("seg-repair-pick").style.display = "none";
+  $("seg-repair-speed-row").style.display = "flex";
   $("seg-repair-clips").style.display = "none";
   $("seg-repair-actions").style.display = "flex";
   $("seg-preview-dialog").style.display = "flex";
@@ -2488,12 +2694,31 @@ function wireSeg() {
       );
   };
   $("seg-preview-video").addEventListener("loadedmetadata", () => {
+    $("seg-preview-video").playbackRate =
+      $("seg-repair-speed-row").style.display !== "none"
+        ? state.segRepairPlaybackRate
+        : 1;
     if (state.segRepairPick) {
       renderSegRepairTimeline();
       setSegRepairFrame(segRepairCursorFrame(), { pause: false });
     }
   });
+  $("seg-repair-speed").onchange = () => {
+    const rate = Number($("seg-repair-speed").value);
+    state.segRepairPlaybackRate = [1, 0.5, 0.25].includes(rate) ? rate : 1;
+    if (state.segRepairUseFrames) {
+      if (state.segRepairFramesPlaying) setSegRepairFramePlaying(true);
+    } else {
+      $("seg-preview-video").playbackRate = state.segRepairPlaybackRate;
+    }
+  };
+  $("seg-repair-frame-play").onclick = () => {
+    if (state.segRepairUseFrames) {
+      setSegRepairFramePlaying(!state.segRepairFramesPlaying);
+    }
+  };
   $("seg-preview-video").addEventListener("timeupdate", () => {
+    if (state.segRepairUseFrames) return;
     const pick = state.segRepairPick;
     if (!pick) return;
     const frame = segRepairCursorFrame();
@@ -2515,6 +2740,7 @@ function wireSeg() {
     $("seg-repair-timeline-label").textContent = total ? `frame ${frame} / ${total - 1}` : `frame ${frame}`;
   });
   $("seg-preview-video").addEventListener("seeked", () => {
+    if (state.segRepairUseFrames) return;
     // `timeupdate` is deliberately throttled by browsers during seeks.
     // Update the picker as soon as the decoded frame is ready instead.
     const pick = state.segRepairPick;
@@ -2545,6 +2771,10 @@ function wireSeg() {
     const tag = (evt.target && evt.target.tagName) || "";
     if (evt.key === " ") {
       evt.preventDefault();
+      if (state.segRepairUseFrames) {
+        setSegRepairFramePlaying(!state.segRepairFramesPlaying);
+        return;
+      }
       const video = $("seg-preview-video");
       if (video.paused) {
         // Resume from the explicitly selected B/current frame. A clip only
@@ -2575,6 +2805,16 @@ function wireSeg() {
     if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
       evt.preventDefault();
       state.segRepairSelectedClipIdx = null;
+      if (state.segRepairUseFrames) {
+        setSegRepairFramePlaying(false);
+        const baseFrame = Number.isInteger(state.segRepairTargetFrame)
+          ? state.segRepairTargetFrame
+          : 0;
+        setSegRepairFrame(baseFrame + (evt.key === "ArrowRight" ? 1 : -1));
+        renderSegRepairClips();
+        renderSegRepairTimeline();
+        return;
+      }
       const video = $("seg-preview-video");
       const baseFrame = !video.paused
         ? segRepairCursorFrame()

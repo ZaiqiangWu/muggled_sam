@@ -379,9 +379,19 @@
           aria-label="Close">&times;</button>
       </div>
       <video id="seg-preview-video" controls preload="metadata"></video>
-      <!-- Repair-only annotated timeline.  Native video controls remain
-           available, while this timeline makes selected A/D ranges visible
-           and directly selectable. -->
+      <img id="seg-repair-frame-image" alt="Repair preview frame" style="display:none">
+      <div id="seg-repair-speed-row" class="seg-repair-speed-row" style="display:none">
+        <button id="seg-repair-frame-play" type="button" style="display:none">Pause</button>
+        <label>Playback speed
+          <select id="seg-repair-speed" aria-label="Repair preview playback speed">
+            <option value="1">×1</option>
+            <option value="0.5">×0.5</option>
+            <option value="0.25">×0.25</option>
+          </select>
+        </label>
+      </div>
+      <!-- Repair-only annotated timeline. It makes selected A/D ranges
+           visible and directly selectable while the picker shows PNG frames. -->
       <div id="seg-repair-timeline" class="seg-repair-timeline" style="display:none">
         <div class="seg-repair-timeline-track">
           <input id="seg-repair-scrubber" type="range" min="0" max="0" value="0"

@@ -578,6 +578,14 @@ input[type="range"] { width: 100%; }
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
 }
+.seg-repair-speed-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.seg-repair-speed-row label { display: inline-flex; align-items: center; gap: 6px; }
+.seg-repair-speed-row select { font-size: 12px; }
 
 /* The repair timeline is separate from the browser's native controls so
    range annotations remain reliable across browsers. */
@@ -660,13 +668,15 @@ input[type="range"] { width: 100%; }
 .video-modal-close:hover { color: var(--danger); background: var(--panel2); }
 #seg-repair-actions { margin-top: 8px; }
 #seg-repair-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-#seg-preview-video {
+#seg-preview-video,
+#seg-repair-frame-image {
   display: block;
   width: 100%;
   /* Reserve vertical space for the repair timeline, A/B controls and clips. */
   max-height: clamp(160px, calc(84vh - 260px), 72vh);
   background: #000;
   border-radius: 6px;
+  object-fit: contain;
 }
 .video-modal-foot {
   display: flex;
