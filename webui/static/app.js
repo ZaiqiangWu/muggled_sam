@@ -858,10 +858,10 @@ function getDeviceDefault() {
 const TOOLS = ["hover", "box", "fg", "bg"];
 
 document.addEventListener("keydown", (evt) => {
-  // The repair picker owns its playback, A/B and arrow keys while it is open. Let its
+  // The repair picker owns its playback, A/D/S and arrow keys while it is open. Let its
   // later listener handle them instead of changing authoring tools/buffers.
   if (state.segRepairPick && $("seg-preview-dialog").style.display !== "none" &&
-      [" ", "ArrowLeft", "ArrowRight", "a", "A", "b", "B"].includes(evt.key)) return;
+      [" ", "ArrowLeft", "ArrowRight", "a", "A", "d", "D", "s", "S"].includes(evt.key)) return;
   const tag = (evt.target && evt.target.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
@@ -1359,7 +1359,7 @@ function segRepairHtml(job) {
   }
   if (job.accepted || !job.has_tars) return acceptedChip;
   return `<button class="seg-repair-open" data-id="${id}"
-    title="Repair isolated flawed frames: opens the preview video to set A/B points on the progress bar; each A/B pair becomes one repair clip that can be accepted or discarded separately">Repair</button>${acceptedChip}`;
+    title="Repair isolated flawed frames: opens the preview video to set A/D points on the progress bar; each A/D pair becomes one repair clip that can be accepted or discarded separately">Repair</button>${acceptedChip}`;
 }
 
 function segJobHtml(job) {
@@ -1724,8 +1724,8 @@ function findSegJob(jobId) {
   return (state.segJobs || []).find((j) => j.job_id === jobId) || null;
 }
 
-// Frame repair picker: set A/B points on the preview video's progress bar
-// (A=B = single frame) instead of typing frame numbers. The preview mp4 is
+// Frame repair picker: set A/D points on the preview video's progress bar
+// (S creates a single frame) instead of typing frame numbers. The preview mp4 is
 // encoded at 30 fps with exactly one frame per mask frame, so the mp4
 // frame at time t maps 1:1 to mask frame index floor(t * 30).
 function openSegRepairPicker(jobId) {
@@ -1811,10 +1811,10 @@ function renderSegRepairTimeline() {
   }
   scrubber.disabled = false;
   scrubber.max = String(total - 1);
-  // A/B and keyboard adjustments can be one seek ahead of the decoder.
+  // A/D and keyboard adjustments can be one seek ahead of the decoder.
   // While paused, preserve that explicitly selected target instead of
   // snapping the progress thumb back to the last decoded frame (often A
-  // immediately after Set B).
+  // immediately after setting D).
   const video = $("seg-preview-video");
   const displayFrame = video.paused && Number.isInteger(state.segRepairTargetFrame)
     ? state.segRepairTargetFrame
@@ -1853,14 +1853,43 @@ function setSegRepairPoint(which) {
   pick[which] = selectedFrame;
   state.segRepairTargetFrame = selectedFrame;
   // A committed clip only loops after the user explicitly clicks its chip or
-  // timeline marker. Setting a new A/B range must not start a loop.
+  // timeline marker. Setting a new A/D range must not start a loop.
   if (which === "a") state.segRepairSelectedClipIdx = null;
   if (pick.a != null && pick.b != null) commitDraftClip();
   renderSegRepairClips();
   updateSegRepairPickUi();
 }
 
-// The draft A/B pair becomes a committed clip (B auto-commits the range;
+function toggleSegRepairA() {
+  const pick = state.segRepairPick;
+  if (!pick) return;
+  // A is deliberately a toggle: a second A clears the draft without
+  // disturbing already committed clips.
+  if (pick.a != null) {
+    pick.a = null;
+    pick.b = null;
+    updateSegRepairPickUi();
+    return;
+  }
+  setSegRepairPoint("a");
+}
+
+function setSegRepairSingleFrame() {
+  const pick = state.segRepairPick;
+  if (!pick) return;
+  // Equivalent to setting A then D at the current playhead. A pending draft
+  // is replaced so S always has its advertised single-frame behavior.
+  const frame = segRepairCursorFrame();
+  pick.a = frame;
+  pick.b = frame;
+  state.segRepairTargetFrame = frame;
+  state.segRepairSelectedClipIdx = null;
+  commitDraftClip();
+  renderSegRepairClips();
+  updateSegRepairPickUi();
+}
+
+// The draft A/D pair becomes a committed clip (D auto-commits the range;
 // a lone A stays a draft = single-frame clip until Start).
 function commitDraftClip() {
   const pick = state.segRepairPick;
@@ -1879,7 +1908,7 @@ function commitDraftClip() {
   let direction = "forward";
   if (total > 0 && s === 0) direction = "backward";
   pick.clips.push({ s, e, direction });
-  // Do not select the new clip automatically: after Set B, Space should play
+  // Do not select the new clip automatically: after Set D, Space should play
   // forward from B, not loop back to A.
   state.segRepairSelectedClipIdx = null;
 }
@@ -1945,13 +1974,19 @@ function renderSegRepairClips() {
 function updateSegRepairPickUi() {
   const pick = state.segRepairPick;
   if (!pick) return;
+  const aButton = $("seg-repair-set-a");
+  aButton.textContent = pick.a == null ? "Set A" : "Clear A";
+  aButton.title = pick.a == null
+    ? "Set point A at the playhead (or press A)"
+    : "Clear the draft A marker (or press A again)";
   const job = findSegJob(pick.jobId);
   const total = job && job.total_frames > 0 ? job.total_frames : 0;
   let hint;
   if (pick.a == null) {
     hint =
-      "Play/scrub to a flawed frame, then press Set A (key A) and Set B " +
-      "(key B) to add a clip (A=B = single frame). Each A/B pair becomes " +
+      "Play/scrub to a flawed frame, then press Set A (key A) and Set D " +
+      "(key D) to add a clip. Press S to add the current frame as a single-frame clip. " +
+      "Press A again to clear its draft. Each A/D pair becomes " +
       "its own clip and can be accepted or discarded separately.";
   } else {
     const a = pick.a;
@@ -1960,7 +1995,7 @@ function updateSegRepairPickUi() {
     const noFwd = total > 0 && s === 0;
     const noBwd = total > 0 && e === total - 1;
     if (pick.b == null) {
-      hint = `Draft: frame ${a} (single frame - set B to widen the clip)`;
+      hint = `Draft: frame ${a} (single frame - set D to widen the clip)`;
     } else {
       hint = `Draft: frames ${s}-${e} (${e - s + 1} frame${e - s ? "s" : ""})`;
     }
@@ -2414,15 +2449,20 @@ function wireSeg() {
   // 追加要求2: mask preview video dialog
   $("seg-preview-close").onclick = closeSegPreview;
   $("seg-preview-dialog").addEventListener("click", (evt) => {
-    if (evt.target === $("seg-preview-dialog")) closeSegPreview();
+    // An A/D picker (or its resulting repair-preview footer) contains
+    // client-side repair state.  A stray click on the page overlay must not
+    // discard those clips; only the explicit × button closes repair dialogs.
+    const repairDialog = state.segRepairPick ||
+      $("seg-repair-actions").style.display !== "none";
+    if (evt.target === $("seg-preview-dialog") && !repairDialog) closeSegPreview();
   });
 
-  // frame repair A/B picker + accept/discard actions in the video dialog
-  $("seg-repair-set-a").onclick = () => setSegRepairPoint("a");
+  // frame repair A/D picker + accept/discard actions in the video dialog
+  $("seg-repair-set-a").onclick = toggleSegRepairA;
   $("seg-repair-set-b").onclick = () => setSegRepairPoint("b");
   $("seg-repair-start").onclick = submitSegRepair;
   $("seg-repair-scrubber").oninput = () => {
-    // Scrubbing is intentionally a pause: it gives A/B placement a stable
+    // Scrubbing is intentionally a pause: it gives A/D placement a stable
     // frame, and selecting a marked clip is the explicit way to start a loop.
     // setSegRepairFrame seeks on `input`, not `change`, so the displayed
     // video follows the thumb.  Do not re-render the timeline here: before
@@ -2458,7 +2498,7 @@ function wireSeg() {
     if (!pick) return;
     const frame = segRepairCursorFrame();
     const selected = pick.clips[state.segRepairSelectedClipIdx];
-    // A selected A/B range loops without changing the native video's source.
+    // A selected A/D range loops without changing the native video's source.
     if (selected && frame >= selected.e) {
       state.segRepairTargetFrame = selected.s;
       $("seg-preview-video").currentTime = (selected.s + 0.5) / 30;
@@ -2494,7 +2534,9 @@ function wireSeg() {
   document.addEventListener("keydown", (evt) => {
     if (evt.key === "Escape") {
       if ($("seg-preview-dialog").style.display !== "none") {
-        closeSegPreview();
+        const repairDialog = state.segRepairPick ||
+          $("seg-repair-actions").style.display !== "none";
+        if (!repairDialog) closeSegPreview();
         return;
       }
       return;
@@ -2545,8 +2587,16 @@ function wireSeg() {
       return;
     }
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-    if (evt.key === "a" || evt.key === "A") setSegRepairPoint("a");
-    else if (evt.key === "b" || evt.key === "B") setSegRepairPoint("b");
+    if (evt.key === "a" || evt.key === "A") {
+      evt.preventDefault();
+      toggleSegRepairA();
+    } else if (evt.key === "d" || evt.key === "D") {
+      evt.preventDefault();
+      setSegRepairPoint("b");
+    } else if (evt.key === "s" || evt.key === "S") {
+      evt.preventDefault();
+      setSegRepairSingleFrame();
+    }
   });
 }
 

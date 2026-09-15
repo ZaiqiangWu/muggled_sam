@@ -380,7 +380,7 @@
       </div>
       <video id="seg-preview-video" controls preload="metadata"></video>
       <!-- Repair-only annotated timeline.  Native video controls remain
-           available, while this timeline makes selected A/B ranges visible
+           available, while this timeline makes selected A/D ranges visible
            and directly selectable. -->
       <div id="seg-repair-timeline" class="seg-repair-timeline" style="display:none">
         <div class="seg-repair-timeline-track">
@@ -390,12 +390,12 @@
         </div>
         <span id="seg-repair-timeline-label" class="hint">frame 0</span>
       </div>
-      <!-- Frame repair A/B point picker (segmentation tab): set the flawed
-           frame range on the progress bar (A=B = single frame), pick the
+      <!-- Frame repair A/D point picker (segmentation tab): set the flawed
+           frame range on the progress bar (S = single frame), pick the
            seed direction, then start the repair -->
       <div class="video-modal-foot" id="seg-repair-pick" style="display:none">
-        <button id="seg-repair-set-a" title="Set point A at the playhead (or press A)">Set A</button>
-        <button id="seg-repair-set-b" title="Set point B at the playhead (or press B) - also adds the clip">Set B</button>
+        <button id="seg-repair-set-a" title="Set point A at the playhead; press A again to clear it">Set A</button>
+        <button id="seg-repair-set-b" title="Set point D at the playhead (or press D) - also adds the clip">Set D</button>
         <span class="hint" id="seg-repair-cursor"></span>
         <span class="hint" id="seg-repair-range-hint"></span>
         <span class="spacer"></span>

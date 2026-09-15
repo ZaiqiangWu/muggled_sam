@@ -212,14 +212,15 @@ Each finished job card has three buttons on the bottom right:
   `util/multithread_video_writer.py`).
 - **Repair** — for isolated flawed frames (the mask breaks on a frame or
   short range, then tracking recovers). Opens the preview video with an
-  **A/B point picker**: play or scrub to the start of a flawed range and
-  press **Set A** (keyboard `A`), then press **Set B** (keyboard `B`) at the
-  end of the range — A and B on the same frame = single-frame repair; once
+  **A/D point picker**: play or scrub to the start of a flawed range and
+  press **Set A** (keyboard `A`), then press **Set D** (keyboard `D`) at the
+  end of the range — once
   both points are set the range is committed as a **clip** (shown as a chip
   under the picker and as a marked range on the repair timeline). While the
   picker is open, use `←` / `→` to pause and move exactly one frame at a
-  time. Click a chip or its timeline range to select and loop that clip;
-  click its ✕ to remove it. Repeat Set A / Set B to add more clips — **several
+  time. Press `A` again to cancel the draft A marker; press `S` to create a
+  single-frame clip at the current frame. Click a chip or its timeline range to select and loop that clip;
+  click its ✕ to remove it. Repeat Set A / Set D to add more clips — **several
   clips can be selected at once** (they must not overlap or even touch, and
   are sorted by start frame); each chip has its own direction dropdown and a
   ✕ button to remove it; if the preview is not ready yet it is queued
@@ -234,7 +235,7 @@ Each finished job card has three buttons on the bottom right:
   direction automatically. Then **Start repair**. The preview mp4 is encoded
   at 30 fps with exactly one frame per mask frame, so the progress bar maps
   1:1 to 0-based mask frame indices (the current frame under the playhead is
-  shown next to the Set A / Set B buttons).
+  shown next to the Set A / Set D buttons).
 
   Mechanically each clip seeds a fresh tracking run with
   `initialize_from_mask(encoded_seed_frame, saved_mask)` and steps its range
@@ -244,7 +245,7 @@ Each finished job card has three buttons on the bottom right:
   `./generated_mask_videos/.repair_staging/<job_id>/clipNN/` and each clip is
   encoded into its own short preview
   `./generated_mask_videos/<video_stem>_repaired_mask_cNN.mp4` — exactly the
-  selected A/B frame range (no context frames); the untouched full video is
+  selected A/D frame range (no context frames); the untouched full video is
   the normal mask preview.
   **The original result files are not touched until you decide**. After the
   tracking pass finishes, the button row shows **one `▶ <range>` button per
