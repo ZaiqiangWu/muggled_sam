@@ -110,6 +110,10 @@ DEFAULT_NUM_OBJECT_BUFFERS = 4
 DEFAULT_OBJECT_SCORE_THRESHOLD = 0.0
 DEFAULT_BG_COLOR_HEX = "ff00ff00"
 DEFAULT_FFMPEG = get_default_ffmpeg_command()
+# Preview MP4 writing must remain ordered and single-writer, but PNG I/O and
+# per-frame white-background conversion can overlap with it.
+PREVIEW_IO_WORKERS = 8
+PREVIEW_IO_PREFETCH = 16
 
 # Relative paths are resolved against the repo root so that `./model_weights/sam3.pt`
 # works even if the server is launched from elsewhere. Tracking states are saved
@@ -2519,7 +2523,13 @@ class SegmentationQueue:
     def _encode_preview_video(
         self, job, frame_paths, out_path, progress=None, cancel_check=None
     ):
-        """Encode 'white background + original pixels inside the mask' mp4."""
+        """Encode a preview MP4 with parallel frame preparation.
+
+        This follows check_generated_masks.py's ordered ``pool.map`` design:
+        PNG reads/compositing are parallel, while one writer appends frames in
+        source order. A bounded future queue avoids retaining an entire long
+        video's decoded frames in memory.
+        """
         try:
             import imageio  # lazy: only needed while generating a preview
         except ImportError as err:
@@ -2530,22 +2540,43 @@ class SegmentationQueue:
             out_path, fps=30, codec="libx264", quality=5,
             ffmpeg_params=["-movflags", "+faststart"],
         )
+
+        def prepare_frame(path):
+            if cancel_check is not None and cancel_check():
+                raise RepairCancelled("Repair was cancelled for deletion")
+            data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if data is None or data.ndim < 3 or data.shape[2] < 4:
+                raise ValueError(f"Failed to read mask frame: {path}")
+            frame = data[:, :, :3].copy()
+            frame[data[:, :, 3] == 0] = 255  # white outside the masked region
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
         try:
             n = len(frame_paths)
-            for i, path in enumerate(frame_paths):
-                if cancel_check is not None and cancel_check():
-                    raise RepairCancelled("Repair was cancelled for deletion")
-                data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-                if data is None or data.ndim < 3:
-                    raise ValueError(f"Failed to read mask frame: {path}")
-                frame = data[:, :, :3].copy()
-                alpha = data[:, :, 3]
-                frame[alpha == 0] = 255  # white outside the segmented region
-                writer.append_data(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                if progress is not None:
-                    progress((i + 1) / n)
-                else:
-                    self._set_preview_progress(job, 0.55 + 0.45 * (i + 1) / n)
+            path_it = iter(frame_paths)
+            pending = deque()
+            with ThreadPoolExecutor(max_workers=PREVIEW_IO_WORKERS) as pool:
+                # Submit only a small window ahead of the writer.  Unlike a
+                # plain Executor.map on a long 4K video, this caps decoded
+                # frame memory while preserving strictly ordered output.
+                for _ in range(min(PREVIEW_IO_PREFETCH, n)):
+                    try:
+                        pending.append(pool.submit(prepare_frame, next(path_it)))
+                    except StopIteration:
+                        break
+                for i in range(n):
+                    if cancel_check is not None and cancel_check():
+                        raise RepairCancelled("Repair was cancelled for deletion")
+                    frame = pending.popleft().result()
+                    try:
+                        pending.append(pool.submit(prepare_frame, next(path_it)))
+                    except StopIteration:
+                        pass
+                    writer.append_data(frame)
+                    if progress is not None:
+                        progress((i + 1) / n)
+                    else:
+                        self._set_preview_progress(job, 0.55 + 0.45 * (i + 1) / n)
         finally:
             writer.close()
 
